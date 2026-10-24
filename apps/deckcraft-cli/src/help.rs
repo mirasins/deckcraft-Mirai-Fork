@@ -139,6 +139,22 @@ out grants none of its access. They run the in-process server, so they conflict 
 app is not confined by them).",
     },
     Subcommand {
+        name: "mirai",
+        usage: "mirai --in FILE --instruction TEXT [--model ALIAS] [--slide N]",
+        summary: "preview the Mirai Assistant's text changes to a slide, without applying them",
+        details: "Asks the Mirai Assistant, through your own Claude Code sign-in, how to change the text of one slide,
+and prints JSON: the slide snapshot, the changes by target index, and the explanation. It is a preview
+only: nothing is applied to FILE and nothing is saved.
+
+  --slide N        the slide to read, from 1 (the current slide of FILE by default)
+  --model ALIAS    a Claude model alias or id, such as sonnet, passed to Claude Code
+
+The snapshot is for this preview only: it cannot be reused after the CLI restarts or the file changes.
+Only plain shapes with text are read; tables, groups, notes and pictures are left out.
+
+  deckcraft-cli mirai --in deck.deckcraft --slide 2 --instruction 'Shorten the bullets'",
+    },
+    Subcommand {
         name: "bench",
         usage: "bench (FILE | --sample) [--runs N] [--json]",
         summary: "time opening, drawing, saving and exporting a presentation",

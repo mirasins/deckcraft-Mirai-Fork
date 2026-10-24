@@ -13,6 +13,11 @@
 
 <h1 align="center">DeckCraft</h1>
 
+> **Mirai Fork:** [Mirai Assistant](docs/mirai-assistant.md) is being adapted to presentations.
+> This branch adds a backend foundation and proposal-only CLI, checked offline on Windows
+> (all CI gates passed with OpenGL for GPU tests);
+> it does not yet include a desktop assistant panel. Uses official Claude Code account sign-in only.
+
 <p align="center">
   <b>Presentations and slide shows; an open-source, modern presentation and slide designer, built in pure Rust.</b>
 </p>

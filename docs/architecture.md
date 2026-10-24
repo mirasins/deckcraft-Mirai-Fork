@@ -1,5 +1,9 @@
 # DeckCraft architecture
 
+> **Fork update (2026-10-24, minor):** Mirai Assistant backend/CLI checked offline (eight CI
+> gates with OpenGL on Windows); see
+> [mirai-assistant.md](mirai-assistant.md). Existing layer and readiness assessments are unchanged.
+
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-18 · **Change:** minor (native chart payloads stored in bounded ZIP members; previous: minor, community PR wave 2026-10-14: 320 engine commands, 41 dialogs, the `metafile` crate, 1,641 tests; duplicated L2/L5/L6 rows and headers folded; previous: minor, transition frames) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 How DeckCraft is built today. The binding rules (layering, everything is a command, thin UI, never
@@ -8,6 +12,11 @@ exists. 202k lines of Rust in 24 crates, 3 apps and `xtask`; 1,641 `#[test]` fun
 (`cargo xtask stats` counts them per crate).
 
 ## Layers
+
+The fork adds `deckcraft-assistant` at L4, independent of the engine and UI. Its only backend is
+the official Claude Code CLI, used by `deckcraft-cli mirai` for proposal previews. The engine's
+`assistant.context` and `assistant.apply` commands perform no model calls. A future UI must keep
+generation off the UI thread and require explicit review before dispatching apply.
 
 `cargo xtask layers` enforces that a crate depends only on lower layers (the table in
 `xtask/src/layers.rs`, which is authoritative; AGENTS.md §4 gives the simplified picture), and that
@@ -81,6 +90,7 @@ macOS, Windows, Linux, FreeBSD and web artifacts.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Fork: standalone L4 Mirai client, CLI proposal generation and engine-only context/apply boundary; eight CI gates pass using OpenGL on Windows, native parallel GPU-test limitation documented |
 | 2026-10-18 | minor | Native chart payloads use referenced ZIP members and share media byte/item limits; old inline sidecars remain readable. Synthetic tests cover multi-megabyte layout, all shape owners, shared budgets, missing/corrupt members and invalid references. Scores and milestone scope unchanged |
 | 2026-10-14 | minor | Community PR wave folded: one L2/L5/L6 row each; command registry 320 (`cmd!` registrations in `cmd/*`), 41 dialogs (titled in `dialogs.rs`), 202k lines, 24 crates (`metafile` added at L0), 1,641 tests. The per-PR rows below give the counts each PR saw on its own branch |
 | 2026-10-14 | minor | Size and Position dialog (`shape.sizePosition`): position, size, rotation, scale and lock aspect in one undo step. 227 commands, 28 dialogs |

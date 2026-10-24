@@ -914,6 +914,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckcraft-assistant"
+version = "0.10.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deckcraft-av1"
 version = "0.10.0"
 dependencies = [
@@ -933,6 +942,7 @@ dependencies = [
 name = "deckcraft-cli"
 version = "0.10.0"
 dependencies = [
+ "deckcraft-assistant",
  "deckcraft-engine",
  "deckcraft-mcp",
  "serde_json",

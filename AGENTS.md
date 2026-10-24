@@ -156,6 +156,15 @@ to `main`.
 - Shell gotcha on the dev machine: `mv`/`cp` are aliased interactive; use `/bin/mv -f`, `/bin/cp -f`.
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates you own.
 
+## Mirai Assistant authentication
+
+- Mirai Assistant uses only the official Claude Code CLI and the user's officially supported
+  account sign-in. Never extract or copy its credentials.
+- No API-key, alternate-provider or private-service fallback. Verify the effective authentication
+  method before sending document text and reject unsupported methods, including ambient API keys.
+- Proposals require human review; never automatically apply generated text or enable Claude tools.
+- Keep changes independent from WordCraft's ongoing visual redesign.
+
 ## 7. Planning
 
 `plan/` (gitignored) holds the local plan: `README.md`, `architecture.md`, `execution-plan.md`,
