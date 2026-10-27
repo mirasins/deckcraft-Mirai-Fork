@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod animtimeline;
+pub mod assistant;
 pub mod backstage;
 pub mod canvas;
 pub mod control;
@@ -379,6 +380,21 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.fit", "Fit to Window", None, "{}"),
     ("view.pane", "Task Pane", None, "{pane: format|animation|selection|comments|designer|background|smartart|null}"),
     ("review.thesaurusPane", "Thesaurus", Some("Shift+F7"), "{word?}: open the Thesaurus pane on the selected word"),
+    ("ui.assistant", "Mirai Assistant", None, "{value?: bool}: opens or closes the Mirai Assistant pane (omitted toggles)"),
+    (
+        "ui.assistant.request",
+        "Request Writing Suggestions",
+        None,
+        "{instruction?: string, scope?: selection|slide, model?: string, confirm: true}: sends the chosen text shapes to Claude Code (asynchronous; poll ui.assistant.status); confirm: true is required",
+    ),
+    ("ui.assistant.cancel", "Cancel Mirai Assistant Request", None, "{}: cancels the running request; text already sent cannot be retracted"),
+    ("ui.assistant.status", "Mirai Assistant Status", None, "{}: busy, connection, message and proposals for the current slide"),
+    (
+        "ui.assistant.newConversation",
+        "New Conversation",
+        None,
+        "{}: clears the assistant draft, consent, proposals and messages; cancels a running request",
+    ),
     ("view.tab", "Ribbon Tab", None, "{tab}"),
     ("view.collapseRibbon", "Collapse the Ribbon", Some("Cmd+F1"), "{}"),
     ("view.dark", "Dark Mode", None, "{on?: bool}"),
@@ -507,6 +523,8 @@ pub struct SlideApp {
     pub(crate) thumb_drag: Option<(usize, usize)>,
     /// Selection pane: folded groups, renaming, drag and drop.
     pub selpane: selpane::State,
+    /// Mirai Assistant: the ephemeral conversation, bound to the active presentation.
+    pub assistant: assistant::State,
     /// Arrange ▸ Align: Align to Slide (`true`) or Align Selected Objects, ticked for that selection.
     pub(crate) align_to: Option<(Vec<deckcraft_model::ShapeId>, bool)>,
     /// View › New Window: a second window on one presentation. `None` when it is closed.
@@ -587,6 +605,7 @@ impl SlideApp {
             ui_fonts: uifonts::UiFonts::default(),
             thumb_drag: None,
             selpane: selpane::State::default(),
+            assistant: assistant::State::default(),
             align_to: None,
             doc_window: None,
             sorter: sorter::State::default(),
@@ -1045,6 +1064,9 @@ impl SlideApp {
                     // The browser's asynchronous picker would open the file as a new document.
                     self.set_status("Browse for Themes needs the desktop app for now".to_string());
                 }
+            }
+            "ui.assistant" | "ui.assistant.request" | "ui.assistant.cancel" | "ui.assistant.status" | "ui.assistant.newConversation" => {
+                return assistant::command(self, id, p);
             }
             "app.qat" => return qat::command(self, p),
             "app.find" | "app.replace" if self.session.active().is_some() => {
@@ -1611,6 +1633,7 @@ impl SlideApp {
         }
         self.last_time = now;
         self.drain_control(ctx);
+        assistant::logic(self, ctx);
         self.poll_opening();
         if self.fonts_ready {
             self.drain_inbox();
@@ -2109,6 +2132,8 @@ fn js_now() -> f64 {
 
 #[cfg(test)]
 mod animpane_tests;
+#[cfg(test)]
+mod assistant_tests;
 #[cfg(test)]
 mod browsetheme_tests;
 #[cfg(test)]

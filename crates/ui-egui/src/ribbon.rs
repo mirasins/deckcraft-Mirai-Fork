@@ -2179,6 +2179,12 @@ fn review(app: &mut SlideApp, ui: &mut Ui) {
         big(app, ui, Icon::Thesaurus, "Thesaurus", "review.thesaurusPane", json!({}));
     });
     group(ui, |ui| {
+        let on = app.ui.pane.as_deref() == Some(crate::assistant::PANE);
+        if big_button_ex(ui, Icon::Sparkle, "Mirai\nAssistant", true, false, on).0.clicked() {
+            run(app, "ui.assistant", json!({"value": !on}));
+        }
+    });
+    group(ui, |ui| {
         big(app, ui, Icon::Accessibility, "Check\nAccessibility", "app.dialog", json!({"id": "accessibility"}));
     });
     group(ui, |ui| {

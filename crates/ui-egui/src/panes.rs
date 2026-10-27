@@ -11,16 +11,23 @@ use crate::ribbon::{cref_param, paint_anim_tile};
 use crate::theme::{self, Tokens};
 use crate::{SlideApp, widgets};
 
+/// The Mirai Assistant pane's width: narrow, so the slide keeps its room.
+const ASSISTANT_PANE_WIDTH: f32 = 280.0;
+
 pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(pane) = app.ui.pane.clone() else { return };
-    egui::Panel::right("task_pane")
+    let assistant = pane == crate::assistant::PANE;
+    let width = if assistant { ASSISTANT_PANE_WIDTH } else { app.ui.pane_width };
+    egui::Panel::right(if assistant { "assistant_pane" } else { "task_pane" })
         .resizable(true)
-        .default_size(app.ui.pane_width)
+        .default_size(width)
         .size_range(240.0..=520.0)
         .frame(egui::Frame::NONE.fill(t.card).inner_margin(egui::Margin::same(10)))
         .show(ui, |ui| {
-            app.ui.pane_width = ui.available_width() + 20.0;
+            if !assistant {
+                app.ui.pane_width = ui.available_width() + 20.0;
+            }
             let title = match pane.as_str() {
                 "format" => "Format Shape",
                 "background" => "Format Background",
@@ -31,6 +38,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
                 "smartart" => "Text Pane",
                 "thesaurus" => "Thesaurus",
                 "revisions" => "Revisions",
+                "assistant" => "Mirai Assistant",
                 _ => "Pane",
             };
             ui.horizontal(|ui| {
@@ -47,6 +55,10 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
                 });
             });
             ui.add_space(6.0);
+            if assistant {
+                crate::assistant::show(app, ui);
+                return;
+            }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match pane.as_str() {
                 "format" => format_shape(app, ui),
                 "background" => background(app, ui),

@@ -37,6 +37,7 @@ deckcraft-isobmff = { path = "crates/isobmff" }
 deckcraft-matroska = { path = "crates/matroska" }
 deckcraft-ogg = { path = "crates/ogg" }
 deckcraft-opus = { path = "crates/opus" }
+deckcraft-assistant = { path = "crates/assistant" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }

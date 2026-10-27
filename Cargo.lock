@@ -914,6 +914,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckcraft-assistant"
+version = "0.10.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deckcraft-av1"
 version = "0.10.0"
 dependencies = [
@@ -1164,6 +1173,7 @@ name = "deckcraft-ui-egui"
 version = "0.10.0"
 dependencies = [
  "deckcraft-anim",
+ "deckcraft-assistant",
  "deckcraft-color",
  "deckcraft-engine",
  "deckcraft-fonts",
