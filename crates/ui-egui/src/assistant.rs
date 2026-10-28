@@ -66,11 +66,12 @@ struct Proposal {
 pub struct State {
     /// The presentation (`uid`) the conversation belongs to.
     doc: Option<u64>,
+    slide: Option<usize>,
     scope: &'static str,
     instruction: String,
     /// Claude model alias or id; empty keeps Claude Code's default.
     model: String,
-    /// Explicit per-request consent. Reset on send, scope change and presentation switch.
+    /// Explicit per-request consent. Reset on send, scope change and slide or presentation switch.
     consent: bool,
     connection: Option<AuthState>,
     message: String,
@@ -85,6 +86,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             doc: None,
+            slide: None,
             scope: "selection",
             instruction: String::new(),
             model: String::new(),
@@ -259,6 +261,7 @@ fn record(state: &mut State, pending: Pending, mut response: Response) {
 pub fn preview_proposal(app: &mut SlideApp, instruction: &str, context: Value, response: Response) -> Result<u64, String> {
     let (doc, slide) = app.session.active().map(|d| (d.uid, d.selection.slide)).ok_or("open a presentation first")?;
     app.assistant.doc = Some(doc);
+    app.assistant.slide = Some(slide);
     let (_, receiver) = std::sync::mpsc::channel();
     let pending =
         Pending { cancel: Arc::new(AtomicBool::new(false)), receiver, doc, slide, scope: "selection", context, instruction: instruction.to_owned() };
@@ -327,14 +330,24 @@ pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
     if app.assistant.wake.is_none() {
         app.assistant.wake = Some(ctx.clone());
     }
-    let doc = app.session.active().map(|d| d.uid);
+    let current = app.session.active().map(|d| (d.uid, d.selection.slide));
+    let doc = current.map(|(doc, _)| doc);
+    let slide = current.map(|(_, slide)| slide);
     if app.assistant.doc != doc {
         let had_pending = app.assistant.pending.is_some();
         reset(&mut app.assistant);
         app.assistant.doc = doc;
+        app.assistant.slide = slide;
         if had_pending {
             app.assistant.message = "The presentation changed, so the request was cancelled.".into();
         }
+    } else if app.assistant.slide != slide {
+        app.assistant.consent = false;
+        if let Some(pending) = app.assistant.pending.take() {
+            pending.cancel.store(true, Ordering::Relaxed);
+            app.assistant.message = "The slide changed, so the request was cancelled. Text already sent cannot be retracted.".into();
+        }
+        app.assistant.slide = slide;
     }
     if app.assistant.pending.is_some() && app.ui.pane.as_deref() != Some(PANE) {
         cancel(&mut app.assistant);
@@ -633,6 +646,92 @@ fn accent_text(t: &Tokens) -> Color32 {
     if t.dark { t.text } else { t.accent }
 }
 
+/// Review a proposal beside its first target without changing the slide until Apply is pressed.
+pub(crate) fn show_inline(app: &mut SlideApp, ui: &Ui, xf: crate::canvas::Xf, available: egui::Rect, t: &Tokens) {
+    let Some(doc) = app.session.active() else { return };
+    if doc.selection.target != deckcraft_engine::Target::Slides || !xf.scale.is_finite() || xf.scale <= 0.0 {
+        return;
+    }
+    let Some(proposal) =
+        app.assistant.history.iter().find(|p| p.doc == doc.uid && p.slide == doc.selection.slide && !p.response.suggestions.is_empty())
+    else {
+        return;
+    };
+    let Some(index) = proposal.response.suggestions.first().map(|s| s.index) else { return };
+    let Some(shape_id) = proposal
+        .context
+        .get("targets")
+        .and_then(Value::as_array)
+        .and_then(|targets| targets.get(index))
+        .and_then(|target| target.get("shape"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+    else {
+        return;
+    };
+    let Some(shape) = doc.shape(deckcraft_model::ShapeId(shape_id)) else { return };
+    let transform = deckcraft_engine::cmd::xfrm_of(&doc.doc, &doc.selection, shape);
+    let affine = transform.affine();
+    let corners = [
+        deckcraft_geom::Point::new(0.0, 0.0),
+        deckcraft_geom::Point::new(transform.w, 0.0),
+        deckcraft_geom::Point::new(transform.w, transform.h),
+        deckcraft_geom::Point::new(0.0, transform.h),
+    ];
+    let points = corners.map(|p| xf.to_screen(affine * p));
+    if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) || available.width() < 120.0 || available.height() < 80.0 {
+        return;
+    }
+    let right = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    let top = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let width = 260.0_f32.min(available.width() - 16.0);
+    let x = (right + 8.0).clamp(available.left() + 4.0, available.right() - width - 4.0);
+    let y = if right + width + 12.0 <= available.right() { top } else { available.top() + 4.0 };
+    let y = y.clamp(available.top() + 4.0, available.bottom() - 80.0);
+    let id = proposal.id;
+    let mut apply_clicked = false;
+    let mut dismiss_clicked = false;
+    let message = app.assistant.message.clone();
+    let Some(proposal) = app.assistant.history.iter_mut().find(|p| p.id == id) else { return };
+    egui::Area::new(egui::Id::new(("mirai_inline", id))).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, y)).show(ui.ctx(), |ui| {
+        egui::Frame::new()
+            .fill(t.card)
+            .stroke(Stroke::new(1.0, t.card_border))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(width - 16.0);
+                ui.label(RichText::new("Mirai · Review on slide").strong());
+                if !message.is_empty() {
+                    ui.label(RichText::new(&message).small().color(t.text_dim));
+                }
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    for (n, suggestion) in proposal.response.suggestions.iter_mut().enumerate() {
+                        ui.label(RichText::new(proposal.originals.get(suggestion.index).map_or("", String::as_str)).small().color(t.text_dim));
+                        ui.add(TextEdit::multiline(&mut suggestion.text).id_salt((id, n)).desired_rows(2).desired_width(f32::INFINITY));
+                        if suggestion.text.len() > deckcraft_assistant::MAX_TEXT_BYTES {
+                            let mut end = deckcraft_assistant::MAX_TEXT_BYTES;
+                            while !suggestion.text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            suggestion.text.truncate(end);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    apply_clicked = ui.button("Apply all").clicked();
+                    dismiss_clicked = ui.button("Dismiss").clicked();
+                });
+            });
+    });
+    if apply_clicked {
+        apply(app, id);
+    }
+    if dismiss_clicked {
+        app.assistant.history.retain(|p| p.id != id);
+    }
+}
+
 /// A running request with no process behind it: the test keeps the sender, so the answer is
 /// whatever the test sends (or nothing).
 #[cfg(test)]
@@ -642,6 +741,7 @@ pub(crate) fn start_fake_for_test(app: &mut SlideApp) -> (Arc<AtomicBool>, std::
     let doc = app.session.active().map(|d| d.uid).unwrap_or_default();
     let slide = app.session.active().map(|d| d.selection.slide).unwrap_or(0);
     app.assistant.doc = Some(doc);
+    app.assistant.slide = Some(slide);
     app.assistant.pending = Some(Pending {
         cancel: cancel.clone(),
         receiver,
@@ -652,4 +752,87 @@ pub(crate) fn start_fake_for_test(app: &mut SlideApp) -> (Arc<AtomicBool>, std::
         instruction: "Shorten".into(),
     });
     (cancel, sender)
+}
+
+#[cfg(test)]
+mod slide_consent_tests {
+    use super::*;
+
+    #[test]
+    fn inline_apply_button_changes_the_slide_and_undo_restores_it() {
+        use egui_kittest::kittest::Queryable;
+        let mut session = deckcraft_engine::Session::with_new();
+        deckcraft_engine::sample::open_sample(&mut session).unwrap();
+        let mut app = SlideApp::new(session, crate::Services::default());
+        let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+        let original = context["targets"][0]["original"].as_str().unwrap().to_owned();
+        let shape = context["targets"][0]["shape"].as_u64().unwrap() as u32;
+        let response = Response {
+            suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "Inline replacement".into(), markdown: false }],
+            explanation: String::new(),
+        };
+        preview_proposal(&mut app, "Rewrite", context, response).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(
+            |ui, app: &mut SlideApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        h.get_by_label("Apply all").click();
+        h.run_steps(3);
+        let text = |app: &SlideApp| app.session.active().unwrap().shape(deckcraft_model::ShapeId(shape)).unwrap().text.as_ref().unwrap().text();
+        assert_eq!(text(h.state()), "Inline replacement");
+        h.state_mut().session.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(text(h.state()), original);
+    }
+
+    #[test]
+    fn edited_proposal_applies_to_slide_and_undo_restores_text() {
+        let mut session = deckcraft_engine::Session::with_new();
+        deckcraft_engine::sample::open_sample(&mut session).unwrap();
+        let mut app = SlideApp::new(session, crate::Services::default());
+        let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+        let original = context["targets"][0]["original"].as_str().unwrap().to_owned();
+        let shape = context["targets"][0]["shape"].as_u64().unwrap() as u32;
+        let response = Response {
+            suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "Suggested".into(), markdown: false }],
+            explanation: String::new(),
+        };
+        let id = preview_proposal(&mut app, "Rewrite", context, response).unwrap();
+        app.assistant.history.front_mut().unwrap().response.suggestions[0].text = "Edited draft".into();
+        apply(&mut app, id);
+        let text = |app: &SlideApp| app.session.active().unwrap().shape(deckcraft_model::ShapeId(shape)).unwrap().text.as_ref().unwrap().text();
+        assert_eq!(text(&app), "Edited draft");
+        app.session.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(text(&app), original);
+    }
+
+    #[test]
+    fn changing_slide_clears_consent_and_cancels_pending_without_erasing_history() {
+        let mut session = deckcraft_engine::Session::with_new();
+        deckcraft_engine::sample::open_sample(&mut session).unwrap();
+        let mut app = SlideApp::new(session, crate::Services::default());
+        app.ui.pane = Some(PANE.into());
+        let ctx = egui::Context::default();
+        logic(&mut app, &ctx);
+        let (cancel, _sender) = start_fake_for_test(&mut app);
+        let context = json!({"targets": [{"index": 0, "original": "Old", "label": "text"}]});
+        let response = Response {
+            suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "New".into(), markdown: false }],
+            explanation: String::new(),
+        };
+        preview_proposal(&mut app, "Shorten", context, response).unwrap();
+        app.assistant.consent = true;
+        let original_slide = app.session.active().unwrap().selection.slide;
+        app.session.active_mut().unwrap().selection.slide = original_slide.saturating_add(1);
+        logic(&mut app, &ctx);
+        assert!(!app.assistant.consent);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.assistant.pending.is_none());
+        assert_eq!(app.assistant.history.len(), 1);
+        assert!(status(&app)["proposals"].as_array().unwrap().is_empty());
+        assert!(app.assistant.message.contains("cancelled"));
+    }
 }

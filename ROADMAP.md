@@ -133,6 +133,8 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 ## Progress log
 
+- 2026-10-28: Mirai proposals can be edited and reviewed in a contextual card on the current slide before the existing revision-checked, undoable apply. Changing slides clears consent and cancels pending requests; previously sent text cannot be recalled. Offline tests and a headless screenshot cover the feature; no live-account request.
+
 - 2026-10-26: Mirai text assistance: selected-shape or current-slide plain text proposals using the official Claude Code CLI, per-request consent, cancellable background work, preview, stale document/slide checks and one-step undoable apply. Non-text/complex shapes are refused or reported skipped; no arbitrary commands, Markdown, full-deck generation or live-account request. Transport (34), engine (20) and UI (8) focused tests, target-crate Clippy, WASM, layers/assets and synthetic panel screenshot pass. Full workspace CI cannot start Clippy because the host is missing ALSA development metadata (`alsa.pc`); no app/audio source change was made.
 
 | Date | What landed |

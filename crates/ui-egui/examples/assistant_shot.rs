@@ -19,11 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.run("ui.assistant", json!({"value": true}))?;
     app.run("ui.assistant.newConversation", json!({}))?;
 
-    let context = json!({
-        "targets": [{"index": 0, "original": "Our quarterly results beat every target we set, and the team delivered them with care.", "label": "text"}]
-    });
+    let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).map_err(|e| e.to_string())?;
     let response = Response {
-        suggestions: vec![Suggestion { index: 0, text: "Quarterly results beat every target.".into(), markdown: false }],
+        suggestions: vec![Suggestion { index: 0, text: "The Northern Lights".into(), markdown: false }],
         explanation: "Shortened to the key point.".into(),
     };
     assistant::preview_proposal(&mut app, "Shorten this text.", context, response)?;

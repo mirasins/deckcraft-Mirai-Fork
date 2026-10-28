@@ -1,6 +1,6 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (first text-assistance panel) · **Validation:** offline transport, engine and panel tests; no live-account request.
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (editable on-slide review) · **Validation:** offline tests; no live-account request.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
 text shapes or in the current slide's eligible text shapes. It does not generate decks, layouts,
@@ -12,11 +12,14 @@ animations or media, or run commands produced by the model.
    of source text are accepted.
 2. Open **Review › Mirai Assistant**, write an instruction, confirm that specific request and Send.
    Confirmation is per request, not a persistent blanket permission.
-3. Compare each original/proposed text and the explanation. Apply all changes as one undoable
+3. Compare each original/proposed text and the explanation. The latest proposal also appears in an
+   editable card beside its first text shape on the slide; edit its drafts there or dismiss it.
+   Apply all changes as one undoable
    operation, or dismiss the proposal. A changed document revision, slide or target text invalidates
    the proposal; read a new context rather than applying stale changes.
 4. Cancel or New Conversation stops the request. Changing presentations clears the panel's local
-   state. Proposals stay bound to the slide where they were created.
+   state. Changing slides clears consent and cancels an in-flight request; text already sent cannot
+   be retracted. Proposals stay bound to the slide where they were created.
 
 The engine commands `assistant.context` and `assistant.apply` own the snapshot and validation.
 Masters, layouts, notes, handouts, groups, tables, pictures, charts, fields, line breaks and other
@@ -40,4 +43,5 @@ fixtures, including headless panel screenshots without a provider call.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Editable contextual proposal card on the slide, undoable apply and slide-switch consent reset. |
 | 2026-10-26 | minor | First selected/current-slide Mirai pane, standalone official-Claude transport, revision-checked text apply and offline tests. |
