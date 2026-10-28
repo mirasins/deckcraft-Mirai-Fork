@@ -18,7 +18,7 @@ animations or media, or run commands produced by the model.
    operation, or dismiss the proposal. A changed document revision, slide or target text invalidates
    the proposal; read a new context rather than applying stale changes.
 4. Cancel or New Conversation stops the request. Changing presentations clears the panel's local
-   state. Changing slides clears consent and cancels an in-flight request; text already sent cannot
+   state. Changing the selection clears consent. Changing slides clears consent and cancels an in-flight request; text already sent cannot
    be retracted. Proposals stay bound to the slide where they were created.
 
 The engine commands `assistant.context` and `assistant.apply` own the snapshot and validation.

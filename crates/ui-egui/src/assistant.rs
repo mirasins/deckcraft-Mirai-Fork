@@ -67,6 +67,7 @@ pub struct State {
     /// The presentation (`uid`) the conversation belongs to.
     doc: Option<u64>,
     slide: Option<usize>,
+    selection: Option<deckcraft_engine::Selection>,
     scope: &'static str,
     instruction: String,
     /// Claude model alias or id; empty keeps Claude Code's default.
@@ -87,6 +88,7 @@ impl Default for State {
         Self {
             doc: None,
             slide: None,
+            selection: None,
             scope: "selection",
             instruction: String::new(),
             model: String::new(),
@@ -331,6 +333,7 @@ pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
         app.assistant.wake = Some(ctx.clone());
     }
     let current = app.session.active().map(|d| (d.uid, d.selection.slide));
+    let selection = app.session.active().map(|d| d.selection.clone());
     let doc = current.map(|(doc, _)| doc);
     let slide = current.map(|(_, slide)| slide);
     if app.assistant.doc != doc {
@@ -348,6 +351,10 @@ pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
             app.assistant.message = "The slide changed, so the request was cancelled. Text already sent cannot be retracted.".into();
         }
         app.assistant.slide = slide;
+    }
+    if app.assistant.selection != selection {
+        app.assistant.consent = false;
+        app.assistant.selection = selection;
     }
     if app.assistant.pending.is_some() && app.ui.pane.as_deref() != Some(PANE) {
         cancel(&mut app.assistant);
@@ -574,7 +581,7 @@ fn composer(ui: &mut Ui, state: &mut State, busy: bool, action: &mut Option<Act>
         clamp_bytes(&mut state.instruction, MAX_INSTRUCTION_BYTES);
         ui.add(TextEdit::singleline(&mut state.model).hint_text("Model (optional): Claude Code's default").desired_width(f32::INFINITY));
         clamp_bytes(&mut state.model, MAX_MODEL_BYTES);
-        ui.checkbox(&mut state.consent, "Send the chosen text to Claude Code for this request");
+        ui.checkbox(&mut state.consent, "Send the instruction, chosen text and shape descriptions to Claude Code for this request");
         ui.horizontal(|ui| {
             let ready = state.consent && !state.instruction.trim().is_empty();
             if ui.add_enabled(ready, egui::Button::new("Send")).clicked() {
@@ -702,6 +709,7 @@ pub(crate) fn show_inline(app: &mut SlideApp, ui: &Ui, xf: crate::canvas::Xf, av
             .show(ui, |ui| {
                 ui.set_width(width - 16.0);
                 ui.label(RichText::new("Mirai · Review on slide").strong());
+                ui.label(RichText::new(&proposal.instruction).small().color(t.text_dim));
                 if !message.is_empty() {
                     ui.label(RichText::new(&message).small().color(t.text_dim));
                 }
@@ -709,6 +717,9 @@ pub(crate) fn show_inline(app: &mut SlideApp, ui: &Ui, xf: crate::canvas::Xf, av
                     for (n, suggestion) in proposal.response.suggestions.iter_mut().enumerate() {
                         ui.label(RichText::new(proposal.originals.get(suggestion.index).map_or("", String::as_str)).small().color(t.text_dim));
                         ui.add(TextEdit::multiline(&mut suggestion.text).id_salt((id, n)).desired_rows(2).desired_width(f32::INFINITY));
+                        if suggestion.text.is_empty() {
+                            ui.label(RichText::new("Empty proposal: applying removes this text.").small().color(t.contextual));
+                        }
                         if suggestion.text.len() > deckcraft_assistant::MAX_TEXT_BYTES {
                             let mut end = deckcraft_assistant::MAX_TEXT_BYTES;
                             while !suggestion.text.is_char_boundary(end) {
@@ -757,6 +768,19 @@ pub(crate) fn start_fake_for_test(app: &mut SlideApp) -> (Arc<AtomicBool>, std::
 #[cfg(test)]
 mod slide_consent_tests {
     use super::*;
+
+    #[test]
+    fn changing_selection_clears_consent_on_same_slide() {
+        let mut session = deckcraft_engine::Session::with_new();
+        deckcraft_engine::sample::open_sample(&mut session).unwrap();
+        let mut app = SlideApp::new(session, crate::Services::default());
+        let ctx = egui::Context::default();
+        logic(&mut app, &ctx);
+        app.assistant.consent = true;
+        app.session.active_mut().unwrap().selection.shapes.push(deckcraft_model::ShapeId(999));
+        logic(&mut app, &ctx);
+        assert!(!app.assistant.consent);
+    }
 
     #[test]
     fn inline_apply_button_changes_the_slide_and_undo_restores_it() {
