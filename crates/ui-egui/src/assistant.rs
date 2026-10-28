@@ -700,7 +700,7 @@ pub(crate) fn show_inline(app: &mut SlideApp, ui: &Ui, xf: crate::canvas::Xf, av
     let mut dismiss_clicked = false;
     let message = app.assistant.message.clone();
     let Some(proposal) = app.assistant.history.iter_mut().find(|p| p.id == id) else { return };
-    egui::Area::new(egui::Id::new(("mirai_inline", id))).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, y)).show(ui.ctx(), |ui| {
+    egui::Area::new(egui::Id::unique(("mirai_inline", id))).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, y)).show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(t.card)
             .stroke(Stroke::new(1.0, t.card_border))
@@ -716,7 +716,13 @@ pub(crate) fn show_inline(app: &mut SlideApp, ui: &Ui, xf: crate::canvas::Xf, av
                 egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                     for (n, suggestion) in proposal.response.suggestions.iter_mut().enumerate() {
                         ui.label(RichText::new(proposal.originals.get(suggestion.index).map_or("", String::as_str)).small().color(t.text_dim));
-                        ui.add(TextEdit::multiline(&mut suggestion.text).id_salt((id, n)).desired_rows(2).desired_width(f32::INFINITY));
+                        ui.add(
+                            TextEdit::multiline(&mut suggestion.text)
+                                .id_salt((id, n))
+                                .hint_text("Edit proposed text")
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY),
+                        );
                         if suggestion.text.is_empty() {
                             ui.label(RichText::new("Empty proposal: applying removes this text.").small().color(t.contextual));
                         }

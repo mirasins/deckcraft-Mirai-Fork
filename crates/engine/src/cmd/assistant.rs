@@ -10,7 +10,7 @@ use deckcraft_model::text::RunKind;
 use deckcraft_model::{Shape, ShapeId, ShapeKind, SlideId};
 use serde_json::{Map, Value, json};
 
-use super::*;
+use super::{CommandSpec, bad, cmd, has_slide};
 use crate::{Result, Session, Target};
 
 const CMD_CONTEXT: &str = "assistant.context";
