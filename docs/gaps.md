@@ -364,19 +364,23 @@ Detail in [localization-parity.md](localization-parity.md).
 
 ## AI features
 
-> **Last updated:** 2026-10-28 · **Change:** minor (Mirai proposals can now be edited and reviewed on-slide before undoable apply; broader AI features remain open).
+> **Last updated:** 2026-10-29 · **Change:** minor (Mirai proposals can create slides, text boxes and a background and move or resize captured text shapes, previewed and applied in one undo step; broader AI features remain open).
 
 - Mirai offers plain-text rewrites for selected text shapes or eligible text on the current slide
   through the official Claude Code CLI. Each request requires explicit consent; changing the
   selection or slide withdraws consent, cancels pending work, and cannot retract text already sent.
   Proposals can be edited and reviewed beside their target before a stale-context-checked, one-step
-  undoable apply. Designer, speaker coach, subtitles, translation and automatic deck generation
-  remain absent. 16–36 h; see [writing-assistant.md](writing-assistant.md).
+  undoable apply. Proposals can also add up to 100 operations of slide work on the original slide
+  (new Blank, Title or Title and Content slides, text boxes, a solid background, text and position
+  or size of captured text shapes). Pictures, charts, advanced formatting and edits to other existing
+  slides are not included. Designer, speaker coach, subtitles, translation and automatic deck
+  generation remain absent. 16–36 h; see [writing-assistant.md](writing-assistant.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | Mirai proposals add slide work (new slides, text boxes, solid background, text and position/size of captured text shapes) with preview and one undoable apply; limits 100 operations and 64 KiB. |
 | 2026-10-28 | minor | Mirai proposals can be edited and reviewed on-slide; selection changes withdraw consent, slide changes cancel pending work, and undo restores applied text. |
 | 2026-10-26 | minor | First Mirai selected/current-slide text proposal pane; per-request consent, stale-context validation and undoable apply. |
 | 2026-10-25 | trivial | New entries: copying text and cell ranges (no media, no table), a control-server timing test that may fail under load; Proofing notes that automatic lists follow Replace text as you type and that Backspace puts the typed lead back |

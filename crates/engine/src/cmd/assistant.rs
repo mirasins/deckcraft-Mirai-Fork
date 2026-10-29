@@ -21,6 +21,10 @@ pub const MAX_TARGETS: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 /// Longest label a target carries.
 pub const MAX_LABEL_BYTES: usize = 64;
+/// Most operations one `assistant.applyDeck` takes (mirrors the assistant protocol cap).
+pub const MAX_DECK_OPERATIONS: usize = 100;
+/// Largest accepted deck coordinate or size, in points (mirrors the assistant protocol cap).
+pub const MAX_DECK_COORDINATE: f64 = 10_000.0;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -41,6 +45,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{context: snapshot from assistant.context, changes: [{index, text, markdown?: false}]} → {applied, document_id, revision, slide_id}; one undo step, all or nothing",
             has_slide,
             apply
+        ),
+        cmd!(
+            "assistant.applyDeck",
+            "Apply Mirai Slide Changes",
+            [],
+            None,
+            "{context: snapshot, deck: {operations: [...]}}; bounded slide, text, geometry and background changes, one undo step",
+            has_slide,
+            apply_deck
         ),
     ]
 }
@@ -117,7 +130,7 @@ impl Snapshot {
 /// Other control characters (line breaks, field codes) and the object-replacement character are
 /// refused.
 fn plain_ok(text: &str) -> bool {
-    text.chars().all(|c| matches!(c, '\n' | '\r' | '\t') || (!c.is_control() && c != '\u{FFFC}'))
+    text.chars().all(|c| matches!(c, '\n' | '\r' | '\t') || (!c.is_control() && !matches!(c, '\u{FFFC}' | '\u{2028}' | '\u{2029}')))
 }
 
 /// The plain text of a top-level shape the assistant may rewrite: an autoshape or text box whose
@@ -345,6 +358,12 @@ fn parse(v: &Value) -> Result<Request> {
 /// target (a shape on another slide, a group child, a changed text) is refused before any edit.
 fn check_targets(s: &Session, req: &Request) -> Result<()> {
     let st = s.doc()?;
+    if st.selection.target != Target::Slides
+        || st.selection.cells.is_some()
+        || st.selection.text.as_ref().is_some_and(|t| t.notes || t.cell.is_some())
+    {
+        return Err(bad(CMD_APPLY, "the assistant edits slides only, not masters, notes or table cells"));
+    }
     let slide = st
         .doc
         .slides
@@ -416,6 +435,139 @@ fn apply(s: &mut Session, v: &Value) -> Result<Value> {
     }
     let st = s.doc()?;
     Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.revision, "slide_id": req.slide_id}))
+}
+
+/// Executes only a small allowlist of validated presentation operations; model output is never a
+/// command name. The outer command guard rolls back all nested edits on failure.
+fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
+    const CMD: &str = "assistant.applyDeck";
+    let top = object(v, "parameters", &["context", "deck"], CMD)?;
+    let context = top.get("context").ok_or_else(|| bad(CMD, "missing context"))?;
+    let captured = context.get("targets").and_then(Value::as_array).ok_or_else(|| bad(CMD, "missing targets"))?;
+    if captured.len() > MAX_TARGETS {
+        return Err(bad(CMD, "too many targets"));
+    }
+    let mut captured_bytes = 0usize;
+    for target in captured {
+        let m = object(target, "target", &["index", "shape", "label", "original"], CMD)?;
+        let original = text_field(m, "original", CMD, MAX_TEXT_BYTES)?;
+        text_field(m, "label", CMD, MAX_LABEL_BYTES)?;
+        captured_bytes = captured_bytes.saturating_add(original.len());
+        if captured_bytes > MAX_TEXT_BYTES {
+            return Err(bad(CMD, "context is too large"));
+        }
+    }
+    let req = parse(&json!({"context": context, "changes": []}))?;
+    let st = s.doc()?;
+    if st.uid != req.document_id || st.revision != req.revision || st.selection.slide != req.slide_index {
+        return Err(bad(CMD, "stale context or different current slide"));
+    }
+    check_targets(s, &req)?;
+    let deck = object(top.get("deck").ok_or_else(|| bad(CMD, "missing deck"))?, "deck", &["operations"], CMD)?;
+    let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(CMD, "operations must be an array"))?;
+    if ops.is_empty() || ops.len() > MAX_DECK_OPERATIONS {
+        return Err(bad(CMD, format!("provide 1 to {MAX_DECK_OPERATIONS} operations")));
+    }
+    let mut total = 0usize;
+    let mut after_new = false;
+    for op in ops {
+        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color"], CMD)?;
+        let kind = text_field(m, "kind", CMD, 32)?;
+        let present = |key: &str| m.get(key).is_some_and(|v| !v.is_null());
+        let allowed = match kind {
+            "new_slide" => {
+                after_new = true;
+                &["layout", "text"][..]
+            }
+            "add_text" => &["rect", "text"][..],
+            "set_text" => &["target", "text"][..],
+            "set_bounds" => &["target", "rect"][..],
+            "background" => &["color"][..],
+            _ => return Err(bad(CMD, "unknown operation")),
+        };
+        if ["target", "layout", "text", "rect", "color"].iter().any(|key| present(key) && !allowed.contains(key)) {
+            return Err(bad(CMD, "unexpected operation field"));
+        }
+        if kind == "new_slide" {
+            let layout = text_field(m, "layout", CMD, 32)?;
+            if !matches!(layout, "blank" | "title" | "titleAndContent") {
+                return Err(bad(CMD, "invalid layout"));
+            }
+        }
+        if matches!(kind, "set_text" | "set_bounds") {
+            if after_new {
+                return Err(bad(CMD, "original targets cannot be edited after creating a slide"));
+            }
+            let target = usize::try_from(uint(m, "target", CMD)?).map_err(|_| bad(CMD, "invalid target"))?;
+            if req.targets.get(target).is_none() {
+                return Err(bad(CMD, "target outside captured slide"));
+            }
+        }
+        if matches!(kind, "add_text" | "set_text") || (kind == "new_slide" && present("text")) {
+            let text = text_field(m, "text", CMD, MAX_TEXT_BYTES)?;
+            total = total.saturating_add(text.len());
+            if total > MAX_TEXT_BYTES || !plain_ok(text) {
+                return Err(bad(CMD, "invalid or oversized text"));
+            }
+        }
+        if matches!(kind, "add_text" | "set_bounds") {
+            let rect = m.get("rect").and_then(Value::as_array).filter(|r| r.len() == 4).ok_or_else(|| bad(CMD, "rect must contain four numbers"))?;
+            for (i, n) in rect.iter().enumerate() {
+                let n = n.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n <= MAX_DECK_COORDINATE).ok_or_else(|| bad(CMD, "invalid rect"))?;
+                if i >= 2 && n <= 0.0 {
+                    return Err(bad(CMD, "size must be positive"));
+                }
+            }
+        }
+        if kind == "background" {
+            let color = text_field(m, "color", CMD, 7)?;
+            if color.len() != 7 || !color.starts_with('#') || !color.as_bytes().get(1..).is_some_and(|x| x.iter().all(u8::is_ascii_hexdigit)) {
+                return Err(bad(CMD, "color must be #RRGGBB"));
+            }
+        }
+    }
+    for op in ops {
+        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color"], CMD)?;
+        let kind = text_field(m, "kind", CMD, 32)?;
+        match kind {
+            "new_slide" => {
+                let mut params = json!({"layout": m.get("layout")});
+                if let Some(text) = m.get("text").and_then(Value::as_str) {
+                    params["title"] = json!(text);
+                }
+                s.execute("slide.new", &params)?;
+                if m.get("layout").and_then(Value::as_str) == Some("blank")
+                    && let Some(text) = m.get("text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    let size = s.doc()?.doc.slide_size;
+                    let width = if size.width.is_finite() { size.width.max(1.0) } else { 720.0 };
+                    let height = if size.height.is_finite() { size.height.max(1.0) } else { 405.0 };
+                    let x = (width * 0.05).min(36.0);
+                    let y = (height * 0.05).min(24.0);
+                    s.execute("insert.textBox", &json!({"rect": [x, y, (width - 2.0 * x).min(600.0), (height - 2.0 * y).min(60.0)], "text": text}))?;
+                }
+            }
+            "add_text" => {
+                s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
+            }
+            "background" => {
+                s.execute("design.background", &json!({"color": m.get("color")}))?;
+            }
+            "set_text" | "set_bounds" => {
+                let i = usize::try_from(uint(m, "target", CMD)?).map_err(|_| bad(CMD, "invalid target"))?;
+                let target = req.targets.get(i).ok_or_else(|| bad(CMD, "invalid target"))?;
+                if kind == "set_text" {
+                    s.execute("text.set", &json!({"id": target.shape.0, "text": m.get("text")}))?;
+                } else {
+                    let r = m.get("rect").and_then(Value::as_array).ok_or_else(|| bad(CMD, "invalid rect"))?;
+                    s.execute("shape.setBounds", &json!({"ids": [target.shape.0], "x": r.first(), "y": r.get(1), "w": r.get(2), "h": r.get(3)}))?;
+                }
+            }
+            _ => return Err(bad(CMD, "unknown operation")),
+        }
+    }
+    Ok(json!({"applied": ops.len()}))
 }
 #[cfg(test)]
 mod tests {

@@ -89,7 +89,7 @@ impl Default for State {
             doc: None,
             slide: None,
             selection: None,
-            scope: "selection",
+            scope: "slide",
             instruction: String::new(),
             model: String::new(),
             consent: false,
@@ -136,18 +136,16 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
         return Err(format!("the instruction is longer than {MAX_INSTRUCTION_BYTES} bytes"));
     }
     let scope = match p.get("scope").map(|v| v.as_str().ok_or("`scope` must be a string")).transpose()? {
-        None | Some("selection") => "selection",
-        Some("slide") => "slide",
+        Some("selection") => "selection",
+        None | Some("slide") => "slide",
         Some(_) => return Err("`scope` must be selection or slide".into()),
     };
     let model_text = p.get("model").map(|v| v.as_str().ok_or("`model` must be a string")).transpose()?;
     let model = deckcraft_assistant::model_name(model_text).map_err(|e| e.to_string())?;
     let context = app.session.execute("assistant.context", &json!({"scope": scope})).map_err(|e| e.to_string())?;
     let (originals, structure) = targets_of(&context)?;
-    if originals.is_empty() {
-        return Err("no text shapes to change in this scope".into());
-    }
-    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: None };
+    let slide_size = app.session.active().map(|d| format!("Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
+    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size };
     request.validate().map_err(|e| e.to_string())?;
     launch(app, Job { doc, slide, scope, context, instruction, model, request })
 }
@@ -291,6 +289,16 @@ fn proposal_bytes(history: &VecDeque<Proposal>) -> usize {
                 .saturating_add(p.originals.iter().map(String::len).sum::<usize>())
                 .saturating_add(p.response.explanation.len())
                 .saturating_add(p.response.suggestions.iter().map(|s| s.text.len()).sum::<usize>())
+                .saturating_add(p.response.deck.as_ref().map_or(0, |deck| {
+                    deck.operations.iter().fold(0usize, |bytes, op| {
+                        bytes
+                            .saturating_add(op.kind.len())
+                            .saturating_add(op.layout.as_ref().map_or(0, String::len))
+                            .saturating_add(op.text.as_ref().map_or(0, String::len))
+                            .saturating_add(op.color.as_ref().map_or(0, String::len))
+                            .saturating_add(128)
+                    })
+                }))
         })
         .sum()
 }
@@ -379,12 +387,21 @@ pub fn apply(app: &mut SlideApp, id: u64) {
         return;
     }
     let changes: Vec<Value> = proposal.response.suggestions.iter().map(|s| json!({"index": s.index, "text": s.text, "markdown": false})).collect();
-    if changes.is_empty() {
+    if changes.is_empty() && proposal.response.deck.is_none() {
         app.assistant.message = "No text changes to apply.".into();
         return;
     }
     let context = proposal.context.clone();
-    match app.run("assistant.apply", json!({"context": context, "changes": changes})) {
+    if !changes.is_empty() && proposal.response.deck.is_some() {
+        app.assistant.message = "The proposal mixes text and slide operations. Ask again.".into();
+        return;
+    }
+    let (command, params) = if let Some(deck) = &proposal.response.deck {
+        ("assistant.applyDeck", json!({"context": context, "deck": deck}))
+    } else {
+        ("assistant.apply", json!({"context": context, "changes": changes}))
+    };
+    match app.run(command, params) {
         Ok(_) => {
             app.assistant.history.retain(|p| p.id != id);
             app.assistant.message.clear();
@@ -449,7 +466,7 @@ fn status(app: &SlideApp) -> Value {
             .history
             .iter()
             .filter(|p| current == Some((p.doc, p.slide)))
-            .map(|p| json!({"id": p.id, "scope": p.scope, "explanation": p.response.explanation, "suggestions": p.response.suggestions}))
+            .map(|p| json!({"id": p.id, "scope": p.scope, "explanation": p.response.explanation, "suggestions": p.response.suggestions, "deck": p.response.deck}))
             .collect::<Vec<_>>(),
     })
 }
@@ -625,8 +642,8 @@ fn proposal_card(ui: &mut Ui, proposal: &Proposal, t: &Tokens, action: &mut Opti
         if !proposal.response.explanation.is_empty() {
             ui.label(proposal.response.explanation.as_str());
         }
-        if proposal.response.suggestions.is_empty() {
-            ui.label(RichText::new("No text changes proposed.").color(t.text_dim));
+        if proposal.response.suggestions.is_empty() && proposal.response.deck.is_none() {
+            ui.label(RichText::new("No changes proposed.").color(t.text_dim));
         }
         for suggestion in &proposal.response.suggestions {
             let original = proposal.originals.get(suggestion.index).map_or("", String::as_str);
@@ -637,8 +654,18 @@ fn proposal_card(ui: &mut Ui, proposal: &Proposal, t: &Tokens, action: &mut Opti
             let text = if suggestion.text.is_empty() { "(empty: the text is removed)" } else { suggestion.text.as_str() };
             ui.label(RichText::new(text).color(accent_text(t)));
         }
+        if let Some(deck) = &proposal.response.deck {
+            let labels = target_labels(&proposal.context);
+            for op in &deck.operations {
+                ui.separator();
+                ui.label(RichText::new(deck_op_line(op, &labels)).small().color(t.text_dim));
+                if let Some(text) = op.text.as_deref().filter(|t| !t.is_empty()) {
+                    ui.label(RichText::new(text).color(accent_text(t)));
+                }
+            }
+        }
         ui.horizontal(|ui| {
-            let apply = !proposal.response.suggestions.is_empty();
+            let apply = !proposal.response.suggestions.is_empty() || proposal.response.deck.is_some();
             if ui.add_enabled(apply, egui::Button::new("Apply all")).clicked() {
                 *action = Some(Act::Apply(proposal.id));
             }
@@ -647,6 +674,33 @@ fn proposal_card(ui: &mut Ui, proposal: &Proposal, t: &Tokens, action: &mut Opti
             }
         });
     });
+}
+
+/// The shape label of each captured target index, for naming deck operations.
+fn target_labels(context: &Value) -> Vec<String> {
+    context
+        .get("targets")
+        .and_then(Value::as_array)
+        .map(|targets| targets.iter().map(|t| t.get("label").and_then(Value::as_str).unwrap_or("text").to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// One line describing a deck operation for the review card.
+fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String]) -> String {
+    let label = op.target.and_then(|i| labels.get(i)).map_or_else(|| "a shape".to_owned(), |l| format!("\u{201C}{l}\u{201D}"));
+    let rect = op.rect.map_or_else(String::new, |[x, y, w, h]| format!(" at {x}, {y} · {w} × {h} pt"));
+    match op.kind.as_str() {
+        "new_slide" => match op.layout.as_deref() {
+            Some("title") => "New Title slide".to_owned(),
+            Some("titleAndContent") => "New Title and Content slide".to_owned(),
+            _ => "New Blank slide".to_owned(),
+        },
+        "add_text" => format!("Text box{rect}"),
+        "set_text" => format!("Replace the text of {label}"),
+        "set_bounds" => format!("Move and resize {label}{rect}"),
+        "background" => format!("Solid background colour {}", op.color.as_deref().unwrap_or_default()),
+        other => other.to_owned(),
+    }
 }
 
 fn accent_text(t: &Tokens) -> Color32 {
@@ -800,6 +854,7 @@ mod slide_consent_tests {
         let response = Response {
             suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "Inline replacement".into(), markdown: false }],
             explanation: String::new(),
+            deck: None,
         };
         preview_proposal(&mut app, "Rewrite", context, response).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(
@@ -829,6 +884,7 @@ mod slide_consent_tests {
         let response = Response {
             suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "Suggested".into(), markdown: false }],
             explanation: String::new(),
+            deck: None,
         };
         let id = preview_proposal(&mut app, "Rewrite", context, response).unwrap();
         app.assistant.history.front_mut().unwrap().response.suggestions[0].text = "Edited draft".into();
@@ -852,6 +908,7 @@ mod slide_consent_tests {
         let response = Response {
             suggestions: vec![deckcraft_assistant::Suggestion { index: 0, text: "New".into(), markdown: false }],
             explanation: String::new(),
+            deck: None,
         };
         preview_proposal(&mut app, "Shorten", context, response).unwrap();
         app.assistant.consent = true;

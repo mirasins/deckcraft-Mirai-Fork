@@ -23,7 +23,7 @@ fn context(texts: &[&str]) -> Value {
 }
 
 fn response(index: usize, text: &str) -> Response {
-    Response { suggestions: vec![Suggestion { index, text: text.into(), markdown: false }], explanation: "Shorter.".into() }
+    Response { suggestions: vec![Suggestion { index, text: text.into(), markdown: false }], explanation: "Shorter.".into(), deck: None }
 }
 
 fn busy(app: &mut SlideApp) -> bool {
@@ -115,6 +115,56 @@ fn a_proposal_previews_and_applies_only_through_the_engine() {
         assert!(!message.is_empty());
     } else {
         assert!(message.is_empty());
+    }
+}
+
+#[test]
+fn slide_proposal_is_applied_in_app_and_undoable() {
+    let mut app = app();
+    let before = app.session.active().unwrap().doc.slides.len();
+    let context = app.session.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    let response: Response = serde_json::from_value(json!({"suggestions":[], "explanation":"New slide", "deck":{"operations":[
+        {"kind":"new_slide", "target":null, "layout":"blank", "text":null, "rect":null, "color":null},
+        {"kind":"add_text", "target":null, "layout":null, "text":"Hello", "rect":[30,30,200,60], "color":null}
+    ]}}))
+    .unwrap();
+    let id = assistant::preview_proposal(&mut app, "Create a slide", context, response).unwrap();
+    assistant::apply(&mut app, id);
+    let doc = app.session.active().unwrap();
+    assert_eq!(doc.doc.slides.len(), before + 1);
+    assert!(doc.doc.slides[doc.selection.slide].shapes.iter().any(|s| s.text.as_ref().is_some_and(|t| t.text() == "Hello")));
+    app.session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(app.session.active().unwrap().doc.slides.len(), before);
+}
+
+#[test]
+fn a_deck_proposal_card_lists_readable_operations() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = app();
+    app.run("ui.assistant", json!({"value": true})).unwrap();
+    let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let response: Response = serde_json::from_value(json!({
+        "suggestions": [], "explanation": "A new slide carries the findings.",
+        "deck": {"operations": [
+            {"kind":"new_slide", "target":null, "layout":"titleAndContent", "text":"Findings", "rect":null, "color":null},
+            {"kind":"add_text", "target":null, "layout":null, "text":"The aurora peaks near midnight.", "rect":[40, 150, 620, 80], "color":null},
+            {"kind":"background", "target":null, "layout":null, "text":null, "rect":null, "color":"#102A43"}
+        ]}
+    }))
+    .unwrap();
+    assistant::preview_proposal(&mut app, "Add a findings slide.", context, response).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(3);
+    for line in
+        ["New Title and Content slide", "Text box at 40, 150 · 620 × 80 pt", "Solid background colour #102A43", "The aurora peaks near midnight."]
+    {
+        h.get_by_label(line);
     }
 }
 

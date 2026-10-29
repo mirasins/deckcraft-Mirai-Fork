@@ -16,8 +16,8 @@ pub use client::{Client, Provider};
 pub use error::Error;
 pub use protocol::model_name;
 pub use protocol::{
-    AuthState, MAX_EXPLANATION_BYTES, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_OUTPUT_BYTES, MAX_STRUCTURE_BYTES, MAX_TARGETS, MAX_TEXT_BYTES,
-    Request, Response, Suggestion,
+    AuthState, DeckOperation, DeckProposal, MAX_DECK_COORDINATE, MAX_DECK_OPERATIONS, MAX_EXPLANATION_BYTES, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES,
+    MAX_OUTPUT_BYTES, MAX_STRUCTURE_BYTES, MAX_TARGETS, MAX_TEXT_BYTES, Request, Response, Suggestion,
 };
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

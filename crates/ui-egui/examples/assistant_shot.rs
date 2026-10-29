@@ -5,7 +5,7 @@
 //! cargo run -p deckcraft-ui-egui --example assistant_shot -- /tmp/opencode/assistant.png
 //! ```
 
-use deckcraft_assistant::{Response, Suggestion};
+use deckcraft_assistant::{DeckOperation, DeckProposal, Response, Suggestion};
 use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Services, SlideApp, assistant};
 use egui::vec2;
@@ -23,8 +23,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = Response {
         suggestions: vec![Suggestion { index: 0, text: "The Northern Lights".into(), markdown: false }],
         explanation: "Shortened to the key point.".into(),
+        deck: None,
     };
     assistant::preview_proposal(&mut app, "Shorten this text.", context, response)?;
+
+    let deck_context = app.session.execute("assistant.context", &json!({"scope": "slide"})).map_err(|e| e.to_string())?;
+    let deck_response = Response {
+        suggestions: vec![],
+        explanation: "A new slide carries the findings.".into(),
+        deck: Some(DeckProposal {
+            operations: vec![
+                DeckOperation {
+                    kind: "new_slide".into(),
+                    target: None,
+                    layout: Some("titleAndContent".into()),
+                    text: Some("Findings".into()),
+                    rect: None,
+                    color: None,
+                },
+                DeckOperation {
+                    kind: "add_text".into(),
+                    target: None,
+                    layout: None,
+                    text: Some("The aurora peaks near midnight.".into()),
+                    rect: Some([40.0, 150.0, 620.0, 80.0]),
+                    color: None,
+                },
+                DeckOperation { kind: "background".into(), target: None, layout: None, text: None, rect: None, color: Some("#102A43".into()) },
+            ],
+        }),
+    };
+    assistant::preview_proposal(&mut app, "Add a findings slide.", deck_context, deck_response)?;
 
     let mut harness = egui_kittest::Harness::builder().with_size(vec2(1100.0, 720.0)).with_pixels_per_point(1.5).wgpu().build_ui_state(
         |ui, app: &mut SlideApp| {

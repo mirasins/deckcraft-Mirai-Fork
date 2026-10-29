@@ -272,6 +272,86 @@ fn response_validates_structured_output() {
     assert_eq!(parse_response(b"garbage", 1).map(|_| ()), Err(Error::InvalidResponse));
 }
 
+fn envelope(structured: &str) -> String {
+    format!(r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{structured}}}"#)
+}
+
+fn deck_envelope(operations: &str) -> String {
+    envelope(&format!(r#"{{"suggestions":[],"explanation":"e","deck":{{"operations":[{operations}]}}}}"#))
+}
+
+#[test]
+fn deck_proposal_parses_valid_operations() {
+    let valid = deck_envelope(
+        r##"{"kind":"new_slide","layout":"titleAndContent","text":"Plan"},
+           {"kind":"add_text","rect":[10,20,300.5,120],"text":"Line one\nLine two"},
+           {"kind":"background","color":"#1a2B3c"}"##,
+    );
+    let parsed = parse_response(valid.as_bytes(), 0).map(|r| r.deck.map(|d| d.operations.len()));
+    assert_eq!(parsed, Ok(Some(3)));
+
+    let edit = deck_envelope(r#"{"kind":"set_text","target":1,"text":"Shorter"},{"kind":"set_bounds","target":0,"rect":[0,0,10000,10000]}"#);
+    assert!(parse_response(edit.as_bytes(), 2).is_ok());
+
+    let absent = envelope(r#"{"suggestions":[{"index":0,"text":"Short"}],"explanation":"e","deck":null}"#);
+    assert_eq!(parse_response(absent.as_bytes(), 1).map(|r| r.deck.is_none()), Ok(true));
+}
+
+#[test]
+fn deck_proposal_rejects_hostile_or_inconsistent_operations() {
+    let hostile = [
+        // Mixing suggestions with deck work.
+        envelope(r#"{"suggestions":[{"index":0,"text":"x"}],"explanation":"e","deck":{"operations":[{"kind":"new_slide","layout":"blank"}]}}"#),
+        // An empty deck is malformed: without slide work the model answers `deck: null`.
+        envelope(r#"{"suggestions":[],"explanation":"e","deck":{"operations":[]}}"#),
+        // Unknown kinds, layouts and fields.
+        deck_envelope(r#"{"kind":"delete_slide"}"#),
+        deck_envelope(r#"{"kind":"new_slide"}"#),
+        deck_envelope(r#"{"kind":"new_slide","layout":"chart"}"#),
+        deck_envelope(r#"{"kind":"new_slide","layout":"blank","rect":[0,0,1,1]}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","extra":1}"#),
+        envelope(r#"{"suggestions":[],"explanation":"e","deck":{"operations":[],"extra":1}}"#),
+        // add_text needs a valid rect and text.
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1]}"#),
+        deck_envelope(r#"{"kind":"add_text","text":"x"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[-1,0,1,1],"text":"x"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,10001,1],"text":"x"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,0,1],"text":"x"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1],"text":"x"}"#),
+        // set_text and set_bounds target only existing context shapes, before any new slide.
+        deck_envelope(r#"{"kind":"set_text","target":2,"text":"x"}"#),
+        deck_envelope(r#"{"kind":"set_text","text":"x"}"#),
+        deck_envelope(r#"{"kind":"set_text","target":0}"#),
+        deck_envelope(r##"{"kind":"set_text","target":0,"text":"x","color":"#000000"}"##),
+        deck_envelope(r#"{"kind":"set_bounds","target":0,"rect":[0,0,1,1],"text":"x"}"#),
+        deck_envelope(r#"{"kind":"new_slide","layout":"blank"},{"kind":"set_text","target":0,"text":"x"}"#),
+        deck_envelope(r#"{"kind":"new_slide","layout":"blank"},{"kind":"set_bounds","target":0,"rect":[0,0,1,1]}"#),
+        // background needs a #RRGGBB colour and nothing else.
+        deck_envelope(r#"{"kind":"background","color":"red"}"#),
+        deck_envelope(r##"{"kind":"background","color":"#GGGGGG"}"##),
+        deck_envelope(r##"{"kind":"background","color":"#12345"}"##),
+        deck_envelope(r##"{"kind":"background","color":"#1234567"}"##),
+        deck_envelope(r#"{"kind":"background"}"#),
+        deck_envelope(r##"{"kind":"background","color":"#123456","layout":"blank"}"##),
+        // Text must be plain: no control characters, no object replacement or line separators.
+        deck_envelope(r#"{"kind":"new_slide","layout":"blank","text":"bad\u0007"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"a\u2028b"}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"a\ufffcb"}"#),
+        // Too many operations, and total text beyond the limit.
+        deck_envelope(&vec![r##"{"kind":"background","color":"#000000"}"##; 101].join(",")),
+        deck_envelope(&format!(
+            r#"{{"kind":"add_text","rect":[0,0,1,1],"text":"{}"}},{{"kind":"add_text","rect":[0,0,1,1],"text":"{}"}}"#,
+            "x".repeat(40_000),
+            "x".repeat(30_000)
+        )),
+    ];
+    for fixture in &hostile {
+        assert_eq!(parse_response(fixture.as_bytes(), 2).map(|_| ()), Err(Error::InvalidResponse), "{fixture}");
+    }
+    let max = deck_envelope(&vec![r##"{"kind":"background","color":"#000000"}"##; 100].join(","));
+    assert_eq!(parse_response(max.as_bytes(), 0).map(|r| r.deck.map(|d| d.operations.len())), Ok(Some(100)));
+}
+
 #[test]
 fn model_error_fixtures_map_to_sanitized_categories() {
     let cases: [(&str, Error); 8] = [
@@ -373,7 +453,7 @@ fn response_bounds_total_text_and_sizes() {
 #[test]
 fn response_debug_hides_text() {
     let parsed = parse_response(&success(r#"{"suggestions":[{"index":0,"text":"secret words"}],"explanation":"e"}"#), 1);
-    let debug = format!("{:?}", parsed.unwrap_or_else(|_| crate::Response { suggestions: vec![], explanation: String::new() }));
+    let debug = format!("{:?}", parsed.unwrap_or_else(|_| crate::Response { suggestions: vec![], explanation: String::new(), deck: None }));
     assert!(!debug.contains("secret words"));
 }
 
