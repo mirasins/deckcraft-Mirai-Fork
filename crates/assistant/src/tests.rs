@@ -281,6 +281,14 @@ fn deck_envelope(operations: &str) -> String {
 }
 
 #[test]
+fn output_schema_is_valid_json() {
+    // The schema is passed to the real Claude CLI; a truncated one breaks every live request
+    // (GridCraft shipped one once, introduced by an edit that dropped a closing brace).
+    let parsed: serde_json::Value = serde_json::from_str(crate::protocol::OUTPUT_SCHEMA).expect("OUTPUT_SCHEMA must be valid JSON");
+    assert!(parsed.is_object());
+}
+
+#[test]
 fn deck_proposal_parses_valid_operations() {
     let valid = deck_envelope(
         r##"{"kind":"new_slide","layout":"titleAndContent","text":"Plan"},
