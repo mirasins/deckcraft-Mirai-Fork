@@ -295,13 +295,18 @@ fn deck_proposal_parses_valid_operations() {
 
     let absent = envelope(r#"{"suggestions":[{"index":0,"text":"Short"}],"explanation":"e","deck":null}"#);
     assert_eq!(parse_response(absent.as_bytes(), 1).map(|r| r.deck.is_none()), Ok(true));
+
+    // Text suggestions and slide work in one answer are both kept, for an atomic apply.
+    let mixed =
+        envelope(r#"{"suggestions":[{"index":0,"text":"Short"}],"explanation":"e","deck":{"operations":[{"kind":"new_slide","layout":"blank"}]}}"#);
+    let parsed = parse_response(mixed.as_bytes(), 1).unwrap();
+    assert_eq!(parsed.suggestions.len(), 1);
+    assert_eq!(parsed.deck.map(|d| d.operations.len()), Some(1));
 }
 
 #[test]
 fn deck_proposal_rejects_hostile_or_inconsistent_operations() {
     let hostile = [
-        // Mixing suggestions with deck work.
-        envelope(r#"{"suggestions":[{"index":0,"text":"x"}],"explanation":"e","deck":{"operations":[{"kind":"new_slide","layout":"blank"}]}}"#),
         // An empty deck is malformed: without slide work the model answers `deck: null`.
         envelope(r#"{"suggestions":[],"explanation":"e","deck":{"operations":[]}}"#),
         // Unknown kinds, layouts and fields.

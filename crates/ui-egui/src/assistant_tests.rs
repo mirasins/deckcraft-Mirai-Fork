@@ -346,3 +346,44 @@ fn the_assistant_pane_shows_the_logo_with_an_accessible_name() {
     h.run_steps(2);
     h.get_by_label("Mirai logo");
 }
+
+#[test]
+fn a_mixed_text_and_slide_proposal_applies_in_one_undo_step() {
+    let mut app = app();
+    let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let slide = app.session.active().unwrap().selection.slide;
+    let before = app.session.active().unwrap().doc.slides.len();
+    let original = context["targets"][0]["original"].as_str().unwrap().to_owned();
+    let shape = context["targets"][0]["shape"].as_u64().unwrap() as u32;
+    let response: Response = serde_json::from_value(json!({
+        "suggestions": [{"index": 0, "text": "Rewritten", "markdown": false}],
+        "explanation": "Mixed",
+        "deck": {"operations": [{"kind": "new_slide", "target": null, "layout": "blank", "text": null, "rect": null, "color": null}]}
+    }))
+    .unwrap();
+    let id = assistant::preview_proposal(&mut app, "Mixed", context, response).unwrap();
+    assistant::apply(&mut app, id);
+    let text = |app: &SlideApp| {
+        let doc = app.session.active().unwrap();
+        doc.doc.slides[slide].shapes.iter().find(|sh| sh.id.0 == shape).unwrap().text.as_ref().unwrap().text()
+    };
+    assert_eq!(app.assistant.message, "");
+    assert_eq!(app.session.active().unwrap().doc.slides.len(), before + 1);
+    assert_eq!(text(&app), "Rewritten");
+    app.session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(app.session.active().unwrap().doc.slides.len(), before);
+    assert_eq!(text(&app), original);
+}
+
+#[test]
+fn moving_the_selection_keeps_a_proposal_applicable() {
+    let mut app = app();
+    let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let shape = context["targets"][0]["shape"].as_u64().unwrap();
+    let id = assistant::preview_proposal(&mut app, "Shorten", context, response(0, "Short")).unwrap();
+    app.session.execute("edit.select", &json!({"ids": [shape]})).unwrap();
+    assistant::apply(&mut app, id);
+    assert_eq!(app.assistant.message, "");
+    let status = app.run("ui.assistant.status", json!({})).unwrap();
+    assert!(status["proposals"].as_array().is_some_and(Vec::is_empty), "{status}");
+}

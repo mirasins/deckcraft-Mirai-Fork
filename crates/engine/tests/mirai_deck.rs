@@ -114,3 +114,65 @@ fn works_from_an_empty_slide() {
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(s.active().unwrap().doc.slides.len(), before);
 }
+
+#[test]
+fn mixed_text_and_slide_changes_apply_as_one_undo_step() {
+    let mut s = Session::with_new();
+    s.execute("slide.new", &json!({"layout":"blank"})).unwrap();
+    let id = s.execute("insert.textBox", &json!({"rect":[10,20,100,50],"text":"Old"})).unwrap()["id"].as_u64().unwrap();
+    let before = s.active().unwrap().doc.slides.len();
+    let context = s.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    let target = context["targets"].as_array().unwrap().iter().position(|t| t["shape"] == id).unwrap();
+    let changes = json!([{"index": target, "text": "Rewritten"}]);
+    let deck = json!({"operations": [
+        {"kind":"new_slide", "layout":"blank", "text":"Next", "target":null, "rect":null, "color":null},
+        {"kind":"add_text", "layout":null, "text":"Detail", "target":null, "rect":[30,30,200,60], "color":null}
+    ]});
+    let out = s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck, "changes": changes})).unwrap();
+    assert_eq!(out["text_changes"], 1);
+    assert_eq!(s.active().unwrap().doc.slides.len(), before + 1);
+    let shape = s.active().unwrap().doc.slides[1].shapes.iter().find(|sh| sh.id.0 == id as u32).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(shape, "Rewritten");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.slides.len(), before);
+    let shape = s.active().unwrap().doc.slides[1].shapes.iter().find(|sh| sh.id.0 == id as u32).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(shape, "Old");
+}
+
+#[test]
+fn a_target_with_both_a_suggestion_and_set_text_changes_nothing() {
+    let mut s = Session::with_new();
+    s.execute("slide.new", &json!({"layout":"blank"})).unwrap();
+    let id = s.execute("insert.textBox", &json!({"rect":[10,20,100,50],"text":"Old"})).unwrap()["id"].as_u64().unwrap();
+    let context = s.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    let target = context["targets"].as_array().unwrap().iter().position(|t| t["shape"] == id).unwrap();
+    let before = s.active().unwrap().doc.slides.len();
+    let deck = json!({"operations": [
+        {"kind":"new_slide", "layout":"blank", "text":null, "target":null, "rect":null, "color":null},
+        {"kind":"set_text", "layout":null, "text":"Conflict", "target":target, "rect":null, "color":null}
+    ]});
+    let changes = json!([{"index": target, "text": "Rewritten"}]);
+    assert!(s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck, "changes": changes})).is_err());
+    assert_eq!(s.active().unwrap().doc.slides.len(), before);
+    let shape = s.active().unwrap().doc.slides[1].shapes.iter().find(|sh| sh.id.0 == id as u32).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(shape, "Old");
+}
+
+#[test]
+fn a_failed_text_change_in_a_mixed_apply_leaves_the_slides_alone() {
+    let mut s = Session::with_new();
+    s.execute("slide.new", &json!({"layout":"blank"})).unwrap();
+    let id = s.execute("insert.textBox", &json!({"rect":[10,20,100,50],"text":"Old"})).unwrap()["id"].as_u64().unwrap();
+    let context = s.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    let target = context["targets"].as_array().unwrap().iter().position(|t| t["shape"] == id).unwrap();
+    let before = s.active().unwrap().doc.slides.len();
+    let deck = json!({"operations": [
+        {"kind":"new_slide", "layout":"blank", "text":null, "target":null, "rect":null, "color":null},
+        {"kind":"add_text", "layout":null, "text":"Bad", "target":null, "rect":[0,0,-1,20], "color":null}
+    ]});
+    let changes = json!([{"index": target, "text": "Rewritten"}]);
+    assert!(s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck, "changes": changes})).is_err());
+    assert_eq!(s.active().unwrap().doc.slides.len(), before);
+    let shape = s.active().unwrap().doc.slides[1].shapes.iter().find(|sh| sh.id.0 == id as u32).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(shape, "Old");
+}

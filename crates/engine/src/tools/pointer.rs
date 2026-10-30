@@ -206,6 +206,7 @@ impl Session {
                 st.doc = i.doc;
                 st.selection = i.selection;
                 st.revision += 1;
+                st.content_revision += 1;
             }
             self.tool.vertex_kind = kind;
         }

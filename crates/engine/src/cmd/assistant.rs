@@ -159,6 +159,8 @@ struct PresentationPiece {
 struct PresentationSnapshot {
     document_id: u64,
     revision: u64,
+    /// The slide that was current when the snapshot was read; the apply must come from it.
+    slide_index: usize,
     skipped: usize,
     targets: Vec<PresentationPiece>,
 }
@@ -169,6 +171,7 @@ impl PresentationSnapshot {
             "document_id": self.document_id,
             "revision": self.revision,
             "scope": "presentation",
+            "slide_index": self.slide_index,
             "skipped": self.skipped,
             "targets": self.targets.iter().map(|t| json!({
                 "index": t.index,
@@ -186,6 +189,7 @@ impl PresentationSnapshot {
 struct PresentationRequest {
     document_id: u64,
     revision: u64,
+    slide_index: usize,
     targets: Vec<PresentationPiece>,
     changes: Vec<(usize, String)>,
 }
@@ -343,7 +347,7 @@ fn read(s: &Session, scope: Scope, cmd: &str) -> Result<Snapshot> {
             }
         }
     }
-    Ok(Snapshot { document_id: st.uid, revision: st.revision, scope, slide_id: slide.id, slide_index: index, skipped, targets })
+    Ok(Snapshot { document_id: st.uid, revision: st.content_revision, scope, slide_id: slide.id, slide_index: index, skipped, targets })
 }
 
 fn context(s: &mut Session, v: &Value) -> Result<Value> {
@@ -400,7 +404,7 @@ fn read_presentation(s: &Session, cmd: &str) -> Result<PresentationSnapshot> {
             }
         }
     }
-    Ok(PresentationSnapshot { document_id: st.uid, revision: st.revision, skipped, targets })
+    Ok(PresentationSnapshot { document_id: st.uid, revision: st.content_revision, slide_index: st.selection.slide, skipped, targets })
 }
 
 fn presentation_context(s: &mut Session, _v: &Value) -> Result<Value> {
@@ -559,12 +563,12 @@ fn plan(req: &Request) -> Result<Vec<(ShapeId, String)>> {
 /// if one of them fails, the outermost command's guard puts the presentation back.
 fn apply(s: &mut Session, v: &Value) -> Result<Value> {
     let req = parse(v)?;
-    let (uid, revision) = {
+    let (uid, revision, slide) = {
         let st = s.doc()?;
-        (st.uid, st.revision)
+        (st.uid, st.content_revision, st.selection.slide)
     };
-    if req.document_id != uid || req.revision != revision {
-        return Err(bad(CMD_APPLY, "stale context: the document changed since the context was read; read it again"));
+    if req.document_id != uid || req.revision != revision || slide != req.slide_index {
+        return Err(bad(CMD_APPLY, "stale context: the document or the current slide changed since the context was read; read it again"));
     }
     check_targets(s, &req)?;
     let planned = plan(&req)?;
@@ -575,14 +579,15 @@ fn apply(s: &mut Session, v: &Value) -> Result<Value> {
         s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
     }
     let st = s.doc()?;
-    Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.revision, "slide_id": req.slide_id}))
+    Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.content_revision, "slide_id": req.slide_id}))
 }
 
-/// Executes only a small allowlist of validated presentation operations; model output is never a
-/// command name. The outer command guard rolls back all nested edits on failure.
+/// Executes text replacements on the captured slide, then a small allowlist of validated slide
+/// operations; model output is never a command name. Checks run before the first edit, and the
+/// outer command guard rolls back all nested edits on failure, so the whole answer is one undo step.
 fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
     const CMD: &str = "assistant.applyDeck";
-    let top = object(v, "parameters", &["context", "deck"], CMD)?;
+    let top = object(v, "parameters", &["context", "deck", "changes"], CMD)?;
     let context = top.get("context").ok_or_else(|| bad(CMD, "missing context"))?;
     let captured = context.get("targets").and_then(Value::as_array).ok_or_else(|| bad(CMD, "missing targets"))?;
     if captured.len() > MAX_TARGETS {
@@ -598,17 +603,20 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
             return Err(bad(CMD, "context is too large"));
         }
     }
-    let req = parse(&json!({"context": context, "changes": []}))?;
+    let changes = top.get("changes").cloned().unwrap_or_else(|| json!([]));
+    let req = parse(&json!({"context": context, "changes": changes}))?;
     let st = s.doc()?;
-    if st.uid != req.document_id || st.revision != req.revision || st.selection.slide != req.slide_index {
+    if st.uid != req.document_id || st.content_revision != req.revision || st.selection.slide != req.slide_index {
         return Err(bad(CMD, "stale context or different current slide"));
     }
     check_targets(s, &req)?;
+    let planned = plan(&req)?;
     let deck = object(top.get("deck").ok_or_else(|| bad(CMD, "missing deck"))?, "deck", &["operations"], CMD)?;
     let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(CMD, "operations must be an array"))?;
     if ops.is_empty() || ops.len() > MAX_DECK_OPERATIONS {
         return Err(bad(CMD, format!("provide 1 to {MAX_DECK_OPERATIONS} operations")));
     }
+    let replaced: HashSet<ShapeId> = planned.iter().map(|(shape, _)| *shape).collect();
     let mut total = 0usize;
     let mut after_new = false;
     for op in ops {
@@ -640,8 +648,9 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 return Err(bad(CMD, "original targets cannot be edited after creating a slide"));
             }
             let target = usize::try_from(uint(m, "target", CMD)?).map_err(|_| bad(CMD, "invalid target"))?;
-            if req.targets.get(target).is_none() {
-                return Err(bad(CMD, "target outside captured slide"));
+            let shape = req.targets.get(target).ok_or_else(|| bad(CMD, "target outside captured slide"))?.shape;
+            if kind == "set_text" && replaced.contains(&shape) {
+                return Err(bad(CMD, "a target can't get both a text suggestion and a set_text operation"));
             }
         }
         if matches!(kind, "add_text" | "set_text") || (kind == "new_slide" && present("text")) {
@@ -666,6 +675,9 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 return Err(bad(CMD, "color must be #RRGGBB"));
             }
         }
+    }
+    for (shape, text) in &planned {
+        s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
     }
     for op in ops {
         let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color"], CMD)?;
@@ -708,7 +720,7 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
             _ => return Err(bad(CMD, "unknown operation")),
         }
     }
-    Ok(json!({"applied": ops.len()}))
+    Ok(json!({"applied": ops.len(), "text_changes": planned.len()}))
 }
 /// Parses a presentation-wide apply request. Raw JSON and every cap are checked before anything is
 /// copied out of it.
@@ -716,13 +728,14 @@ fn parse_presentation(v: &Value) -> Result<PresentationRequest> {
     let cmd = "assistant.applyPresentation";
     let top = object(v, "parameters", &["context", "changes"], cmd)?;
     let ctx = top.get("context").ok_or_else(|| bad(cmd, "missing `context`"))?;
-    let c = object(ctx, "context", &["document_id", "revision", "scope", "skipped", "targets"], cmd)?;
+    let c = object(ctx, "context", &["document_id", "revision", "scope", "slide_index", "skipped", "targets"], cmd)?;
     let document_id = uint(c, "document_id", cmd)?;
     let revision = uint(c, "revision", cmd)?;
     let scope = text_field(c, "scope", cmd, 16)?;
     if scope != "presentation" {
         return Err(bad(cmd, format!("`scope` must be \"presentation\", got {:?}", short(scope))));
     }
+    let slide_index = usize::try_from(uint(c, "slide_index", cmd)?).map_err(|_| bad(cmd, "`slide_index` is out of range"))?;
     if c.contains_key("skipped") {
         uint(c, "skipped", cmd)?;
     }
@@ -777,7 +790,7 @@ fn parse_presentation(v: &Value) -> Result<PresentationRequest> {
         }
         changes.push((index, text.to_string()));
     }
-    Ok(PresentationRequest { document_id, revision, targets, changes })
+    Ok(PresentationRequest { document_id, revision, slide_index, targets, changes })
 }
 
 fn check_presentation_targets(s: &Session, req: &PresentationRequest) -> Result<()> {
@@ -839,12 +852,12 @@ fn plan_presentation(req: &PresentationRequest) -> Result<Vec<(usize, ShapeId, S
 fn apply_presentation(s: &mut Session, v: &Value) -> Result<Value> {
     let cmd = "assistant.applyPresentation";
     let req = parse_presentation(v)?;
-    let (uid, revision, original_slide) = {
+    let (uid, revision, current_slide) = {
         let st = s.doc()?;
-        (st.uid, st.revision, st.selection.slide)
+        (st.uid, st.content_revision, st.selection.slide)
     };
-    if req.document_id != uid || req.revision != revision {
-        return Err(bad(cmd, "stale context: the document changed since the context was read; read it again"));
+    if req.document_id != uid || req.revision != revision || current_slide != req.slide_index {
+        return Err(bad(cmd, "stale context: the document or the current slide changed since the context was read; read it again"));
     }
     check_presentation_targets(s, &req)?;
     let planned = plan_presentation(&req)?;
@@ -855,9 +868,9 @@ fn apply_presentation(s: &mut Session, v: &Value) -> Result<Value> {
         s.execute("slide.go", &json!({"index": slide_index}))?;
         s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
     }
-    let _ = s.execute("slide.go", &json!({"index": original_slide}));
+    s.execute("slide.go", &json!({"index": current_slide}))?;
     let st = s.doc()?;
-    Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.revision}))
+    Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.content_revision}))
 }
 
 #[cfg(test)]
@@ -907,7 +920,7 @@ mod tests {
 
     fn state(s: &Session) -> (u64, u64) {
         let st = s.doc().unwrap();
-        (st.uid, st.revision)
+        (st.uid, st.content_revision)
     }
 
     #[test]
@@ -1186,6 +1199,41 @@ mod tests {
         let ctx = json!({"document_id": 1, "revision": 1, "scope": "slide", "slide_id": 1, "slide_index": 0,
             "targets": [{"index": 0, "shape": 1, "label": "x", "original": "a".repeat(65_537)}]});
         assert!(apply(&mut s, &ctx, json!([])).is_err());
+    }
+
+    #[test]
+    fn selection_scope_applies_after_the_user_selects_and_navigates_back() {
+        let mut s = deck();
+        let a = text_box(&mut s, "One");
+        let slide_index = s.doc().unwrap().selection.slide;
+        let ctx = snap(&mut s, "slide");
+        select(&mut s, &[a]);
+        s.execute("slide.go", &json!({"index": 0})).unwrap();
+        s.execute("slide.go", &json!({"index": slide_index})).unwrap();
+        apply(&mut s, &ctx, json!([{"index": 0, "text": "Uno"}])).unwrap();
+        assert_eq!(text_of(&s, a), "Uno");
+    }
+
+    #[test]
+    fn apply_from_another_slide_is_refused_and_changes_nothing() {
+        let mut s = deck();
+        let a = text_box(&mut s, "One");
+        let slide_index = s.doc().unwrap().selection.slide;
+        let ctx = snap(&mut s, "slide");
+        s.execute("slide.go", &json!({"index": 0})).unwrap();
+        assert!(apply(&mut s, &ctx, json!([{"index": 0, "text": "Uno"}])).is_err());
+        assert_eq!(text_of_at(&s, slide_index, a), "One");
+        assert_eq!(s.doc().unwrap().selection.slide, 0);
+    }
+
+    #[test]
+    fn a_document_edit_after_the_context_is_stale() {
+        let mut s = deck();
+        let a = text_box(&mut s, "One");
+        let ctx = snap(&mut s, "slide");
+        s.execute("insert.textBox", &json!({"rect": [10, 10, 50, 20], "text": "Other"})).unwrap();
+        assert!(apply(&mut s, &ctx, json!([{"index": 0, "text": "Uno"}])).is_err());
+        assert_eq!(text_of(&s, a), "One");
     }
 
     #[test]

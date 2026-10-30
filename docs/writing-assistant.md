@@ -16,8 +16,9 @@ to the original slide and newly created slides. It does not run commands produce
    Confirmation is per request, not a persistent blanket permission.
 3. Compare each original/proposed text and the explanation. The latest proposal also appears in an
    editable card beside its first text shape on the slide; edit its drafts there or dismiss it.
-   Apply all changes as one undoable operation, or dismiss the proposal. A changed document revision,
-   slide or target text invalidates the proposal; read a new context rather than applying stale changes.
+   Apply all changes as one undoable operation, or dismiss the proposal. A change to the document's
+   content, to the current slide or to a target's text invalidates the proposal; read a new context
+   rather than applying stale changes. Moving the selection or navigating slides and back does not.
 4. Cancel or New Conversation stops the request. Changing presentations clears the panel's local
    state. Changing the selection clears consent. Changing slides clears consent and cancels an
    in-flight request; text already sent cannot be retracted. Proposals stay bound to the slide where
@@ -29,8 +30,9 @@ and validation.
 
 ## Slide operations
 
-A proposal can instead carry a **deck** list (never mixed with text suggestions in the same answer).
-Operations run in order, and the card lists each one before you apply it:
+A proposal can also carry a **deck** list, together with or instead of text suggestions. Text
+suggestions replace their shapes first; then the operations run in order. The card lists each
+operation before you apply it, and a mixed answer applies as one step:
 
 | Operation | What it does |
 |---|---|
@@ -52,8 +54,9 @@ Rules:
   as Markdown or as commands.
 - The whole list applies as **one undoable step**. Undo restores the slide and its shapes as they
   were before the apply.
-- A proposal made from an older document revision or a different slide is **rejected as stale**
-  before any change; read a new context and ask again.
+- A proposal made from an older document content revision or a different current slide is
+  **rejected as stale** before any change; read a new context and ask again. A text suggestion and a
+  Set text operation may not address the same shape: the whole answer is then refused.
 
 Masters, layouts, notes, handouts, groups, tables, pictures, charts, fields, line breaks and other
 non-plain content are outside this version; explicit current-slide scope reports skipped shapes.
@@ -83,6 +86,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | Fixed proposals that were rejected as stale after a selection change or slide navigation: the snapshot revision is now a content revision (selection and navigation don't bump it). Mixed answers (text suggestions and slide operations) are accepted and apply atomically in one undo step; a suggestion and a set-text on the same shape are refused. Presentation-wide snapshots record their slide and apply only from it. Offline tests only. |
 | 2026-10-29 | minor | Added presentation-wide text context and atomic text replacements across slides; text-only, excludes unsupported objects and is bounded to 256 slides/shapes and 64 KiB. Offline tests only. |
 | 2026-10-29 | minor | Added the original Mirai logo and two-step Enter confirmation, bound to the document revision; no live-account or real-IME check. |
 | 2026-10-29 | minor | Slide operations in proposals (new Blank, Title or Title and Content slides, text boxes, solid background, text and position/size of captured text shapes), listed on the card in readable lines, applied in one undo step with undo and redo; limits of 1 to 100 operations and 64 KiB; an empty operation list, stale proposals and mixed text/slide answers are rejected. Review pass: engine, protocol and UI tests cover several slides with distributed content, an empty starting slide, edits to an existing slide, rejection without partial changes, and atomic undo/redo; the card’s operation lines are asserted by a UI test and a headless screenshot was generated. No live-account request. |

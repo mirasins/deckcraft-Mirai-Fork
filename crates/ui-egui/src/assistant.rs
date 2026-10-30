@@ -451,16 +451,12 @@ pub fn apply(app: &mut SlideApp, id: u64) {
         return;
     }
     let context = proposal.context.clone();
-    if !changes.is_empty() && proposal.response.deck.is_some() {
-        app.assistant.message = "The proposal mixes text and slide operations. Ask again.".into();
-        return;
-    }
     if proposal.scope == "presentation" && proposal.response.deck.is_some() {
         app.assistant.message = "Whole-presentation requests support text changes only; ask again for text suggestions.".into();
         return;
     }
     let (command, params) = if let Some(deck) = &proposal.response.deck {
-        ("assistant.applyDeck", json!({"context": context, "deck": deck}))
+        ("assistant.applyDeck", json!({"context": context, "deck": deck, "changes": changes}))
     } else if proposal.scope == "presentation" {
         ("assistant.applyPresentation", json!({"context": context, "changes": changes}))
     } else {

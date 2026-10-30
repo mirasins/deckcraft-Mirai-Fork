@@ -54,6 +54,7 @@ impl Session {
                     st.selection = selection;
                     st.interaction = None;
                     st.revision = revision.max(st.revision).saturating_add(1);
+                    st.content_revision = st.content_revision.saturating_add(1);
                 }
                 log::error!("command `{id}` panicked: {msg}");
                 self.panics_caught = self.panics_caught.saturating_add(1);

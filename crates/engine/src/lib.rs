@@ -220,6 +220,9 @@ pub struct DocState {
     pub history: History,
     pub path: Option<String>,
     pub revision: u64,
+    /// Bumped only when the presentation's content changes (not for selection or slide navigation),
+    /// so a writing-assistant proposal is stale when the document changed, not when the user moved.
+    pub content_revision: u64,
     pub saved_doc: Arc<Presentation>,
     pub interaction: Option<Interaction>,
     pub uid: u64,
@@ -258,6 +261,7 @@ impl DocState {
             history: History { limit: 500, ..Default::default() },
             path,
             revision: 1,
+            content_revision: 1,
             interaction: None,
             uid: next_uid(),
             title,
@@ -657,6 +661,7 @@ impl Session {
                     st.doc = old;
                     st.selection = sel;
                     st.revision += 1;
+                    st.content_revision += 1;
                 }
                 if outer {
                     self.tool.vertex_kind = vertex_kind;
@@ -666,6 +671,12 @@ impl Session {
         };
         if let Some(st) = self.active_mut() {
             clamp_selection(st);
+        }
+        if let (Some((uid, old, _)), Some(st)) = (&before, self.active_mut())
+            && st.uid == *uid
+            && !Arc::ptr_eq(old, &st.doc)
+        {
+            st.content_revision += 1;
         }
         if let (Some((uid, old, sel)), Some(st)) = (before, self.active_mut())
             && st.uid == uid
@@ -699,6 +710,7 @@ impl Session {
         st.doc = Arc::new(doc);
         st.selection = sel;
         st.revision += 1;
+        st.content_revision += 1;
         Ok(r)
     }
 
