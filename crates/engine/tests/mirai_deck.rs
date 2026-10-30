@@ -201,6 +201,32 @@ fn styled_text_box_applies_format_and_undoes_as_one_step() {
 }
 
 #[test]
+fn partial_style_applies_as_the_serialized_proposal_sends_it() {
+    // The app sends the proposal as serialized: every unset style field is an explicit null.
+    let mut s = Session::with_new();
+    let context = s.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let deck = json!({"operations": [
+        {"kind":"add_text", "layout":null, "text":"Headline", "target":null, "rect":[40, 40, 600, 80], "color":null,
+         "style":{"bold":true, "italic":null, "size":null, "color":"#102A43"}},
+        {"kind":"add_text", "layout":null, "text":"Note", "target":null, "rect":[40, 140, 600, 40], "color":null,
+         "style":{"bold":null, "italic":true, "size":null, "color":null}}
+    ]});
+    s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck})).unwrap();
+    let d = s.active().unwrap();
+    let slide = d.doc.slides.get(d.selection.slide).unwrap();
+    let run_of = |text: &str| {
+        let shape = slide.shapes.iter().find(|sh| sh.text.as_ref().is_some_and(|t| t.text() == text)).unwrap();
+        shape.text.as_ref().unwrap().paragraphs[0].runs[0].props.clone()
+    };
+    let headline = run_of("Headline");
+    assert_eq!(headline.bold, Some(true));
+    assert_eq!(headline.italic, None);
+    let note = run_of("Note");
+    assert_eq!(note.bold, None);
+    assert_eq!(note.italic, Some(true));
+}
+
+#[test]
 fn invalid_style_is_rejected_without_changes() {
     let mut s = Session::with_new();
     let context = s.execute("assistant.context", &json!({"scope": "slide"})).unwrap();

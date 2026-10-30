@@ -203,6 +203,11 @@ fn plain_ok(text: &str) -> bool {
     text.chars().all(|c| matches!(c, '\n' | '\r' | '\t') || (!c.is_control() && !matches!(c, '\u{FFFC}' | '\u{2028}' | '\u{2029}')))
 }
 
+/// `#RRGGBB`, the only colour form a deck proposal may carry.
+fn is_hex_color(color: &str) -> bool {
+    color.len() == 7 && color.starts_with('#') && color.as_bytes().get(1..).is_some_and(|x| x.iter().all(u8::is_ascii_hexdigit))
+}
+
 /// The plain text of a top-level shape the assistant may rewrite: an autoshape or text box whose
 /// runs are all text. `Ok(None)` for pictures, groups, tables, charts, fields, math, line breaks
 /// and characters `text.set` wouldn't reproduce. The size is measured from the runs before any
@@ -673,26 +678,28 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
         }
         if kind == "background" {
             let color = text_field(m, "color", CMD, 7)?;
-            if color.len() != 7 || !color.starts_with('#') || !color.as_bytes().get(1..).is_some_and(|x| x.iter().all(u8::is_ascii_hexdigit)) {
+            if !is_hex_color(color) {
                 return Err(bad(CMD, "color must be #RRGGBB"));
             }
         }
         if kind == "add_text" && present("style") {
             let style = object(m.get("style").ok_or_else(|| bad(CMD, "missing style"))?, "style", &["bold", "italic", "size", "color"], CMD)?;
+            // The app sends an unset field as an explicit null, so a null is the same as no field.
+            let field = |key: &str| style.get(key).filter(|v| !v.is_null());
             let mut styled = false;
             for key in ["bold", "italic"] {
-                if let Some(v) = style.get(key) {
+                if let Some(v) = field(key) {
                     v.as_bool().ok_or_else(|| bad(CMD, format!("`{key}` must be true or false")))?;
                     styled = true;
                 }
             }
-            if let Some(v) = style.get("size") {
+            if let Some(v) = field("size") {
                 v.as_f64().filter(|v| v.is_finite() && (1.0..=MAX_DECK_FONT_PT).contains(v)).ok_or_else(|| bad(CMD, "size must be 1 to 400 pt"))?;
                 styled = true;
             }
-            if let Some(v) = style.get("color") {
+            if let Some(v) = field("color") {
                 let color = v.as_str().ok_or_else(|| bad(CMD, "`color` must be a string"))?;
-                if color.len() != 7 || !color.starts_with('#') || !color.as_bytes().get(1..).is_some_and(|x| x.iter().all(u8::is_ascii_hexdigit)) {
+                if !is_hex_color(color) {
                     return Err(bad(CMD, "color must be #RRGGBB"));
                 }
                 styled = true;
@@ -731,18 +738,19 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 let out = s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
                 let style = m.get("style").filter(|v| !v.is_null());
                 if let Some(style) = style {
+                    let field = |key: &str| style.get(key).filter(|v| !v.is_null());
                     let id = out.get("id").cloned().ok_or_else(|| bad(CMD, "the new text box has no id"))?;
                     s.execute("edit.select", &json!({"ids": [id]}))?;
-                    if let Some(v) = style.get("bold") {
+                    if let Some(v) = field("bold") {
                         s.execute("format.bold", &json!({"on": v}))?;
                     }
-                    if let Some(v) = style.get("italic") {
+                    if let Some(v) = field("italic") {
                         s.execute("format.italic", &json!({"on": v}))?;
                     }
-                    if let Some(v) = style.get("size") {
+                    if let Some(v) = field("size") {
                         s.execute("format.size", &json!({"size": v}))?;
                     }
-                    if let Some(v) = style.get("color") {
+                    if let Some(v) = field("color") {
                         s.execute("format.color", &json!({"color": v}))?;
                     }
                     s.execute("edit.select", &json!({"ids": []}))?;

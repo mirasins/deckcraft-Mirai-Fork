@@ -137,6 +137,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 ## Progress log
 
+- 2026-10-30: Fixed Mirai add_text styles with unset fields: the app sends them as explicit nulls, which the engine refused; nulls now count as unset and a regression test covers it.
 - 2026-10-29: Mirai add_text operations accept an optional style (bold, italic, 1 to 400 pt size, #RRGGBB colour) for the whole text box, validated at the protocol and in the engine, listed on the proposal card and applied in the same one-undo step; existing shapes keep their formatting. Offline tests only.
 - 2026-10-29: Mirai Theme adds a dark violet interface palette with contrast checks, selectable from Preferences and File › Account, persisted in `ui.json`, and independent of Default's light/dark appearance. UI tests cover selection, restyling, cancellation and settings round-trip.
 - 2026-10-29: Mirai proposals can add slides (Blank, Title, Title and Content), text boxes and a solid background, and set the text and position/size of captured text shapes on the original slide. The card lists the operations before a single undoable apply; limits are 100 operations and 64 KiB, and stale proposals are rejected. Offline tests only, no live-account request.
