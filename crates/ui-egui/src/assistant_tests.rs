@@ -168,6 +168,115 @@ fn a_deck_proposal_card_lists_readable_operations() {
     }
 }
 
+/// Harness over the pane, with the instruction field focused and a draft written.
+fn composing_harness(mut app: SlideApp) -> egui_kittest::Harness<'static, SlideApp> {
+    app.run("ui.assistant", json!({"value": true})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.state_mut().assistant.instruction = "Shorten".into();
+    h.run_steps(2);
+    h.ctx.memory_mut(|m| m.request_focus(h.state().assistant.input_id.unwrap()));
+    h.run_steps(2);
+    h
+}
+
+fn enter(h: &mut egui_kittest::Harness<'static, SlideApp>) {
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+}
+
+#[test]
+fn the_first_enter_reviews_the_request_and_adds_no_line() {
+    let mut h = composing_harness(app());
+    enter(&mut h);
+    assert!(h.state().assistant.armed.is_some());
+    assert_eq!(h.state().assistant.instruction, "Shorten");
+    assert!(!busy(h.state_mut()));
+}
+
+#[test]
+fn shift_enter_adds_a_line_and_does_not_review() {
+    let mut h = composing_harness(app());
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    h.run_steps(2);
+    assert!(h.state().assistant.armed.is_none());
+    assert!(h.state().assistant.instruction.contains('\n'));
+}
+
+#[test]
+fn enter_during_ime_composition_is_left_to_the_field() {
+    let mut h = composing_harness(app());
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "ni".into(), active_range_chars: None }));
+    h.run_steps(1);
+    enter(&mut h);
+    assert!(h.state().assistant.armed.is_none());
+    assert!(h.state().assistant.composing);
+}
+
+#[test]
+fn enter_right_after_an_ime_commit_is_ignored() {
+    let mut h = composing_harness(app());
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("x".into())));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert!(h.state().assistant.armed.is_none());
+}
+
+#[test]
+fn enter_outside_the_instruction_field_does_nothing() {
+    let mut app = app();
+    app.run("ui.assistant", json!({"value": true})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.state_mut().assistant.instruction = "Shorten".into();
+    h.run_steps(2);
+    enter(&mut h);
+    assert!(h.state().assistant.armed.is_none());
+}
+
+#[test]
+fn changing_the_request_after_review_cancels_the_confirmation() {
+    let mut h = composing_harness(app());
+    enter(&mut h);
+    assert!(h.state().assistant.armed.is_some());
+    h.state_mut().assistant.instruction.push_str(" more");
+    h.run_steps(2);
+    assert!(h.state().assistant.armed.is_none());
+    assert!(h.state().assistant.message.contains("cancelled"));
+}
+
+#[test]
+fn changing_the_model_after_review_cancels_the_confirmation() {
+    let mut h = composing_harness(app());
+    enter(&mut h);
+    h.state_mut().assistant.model = "sonnet".into();
+    h.run_steps(2);
+    assert!(h.state().assistant.armed.is_none());
+}
+
+#[test]
+fn the_send_button_reviews_and_cancel_withdraws_the_review() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = composing_harness(app());
+    h.get_by_label("Send").click();
+    h.run_steps(3);
+    assert!(h.state().assistant.armed.is_some());
+    h.get_by_label("Confirm and send");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(h.state().assistant.armed.is_none());
+}
+
 #[test]
 fn a_presentation_switch_drops_the_conversation_and_its_proposals() {
     let mut app = app();
@@ -180,4 +289,30 @@ fn a_presentation_switch_drops_the_conversation_and_its_proposals() {
     let status = app.run("ui.assistant.status", json!({})).unwrap();
     assert_eq!(status["busy"], json!(false));
     assert_eq!(status["proposals"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn the_brand_logo_is_rasterised_once_per_context_and_is_not_retried() {
+    let ctx = egui::Context::default();
+    let first = assistant::brand(&ctx).expect("the bundled SVG loads");
+    let second = assistant::brand(&ctx).expect("the cached logo is returned");
+    assert_eq!(first.id(), second.id());
+    let other = egui::Context::default();
+    assert!(assistant::brand(&other).is_some());
+}
+
+#[test]
+fn a_corrupt_logo_falls_back_to_no_texture_instead_of_panicking() {
+    let ctx = egui::Context::default();
+    assert!(assistant::load_svg_texture(&ctx, b"<svg").is_none());
+    assert!(assistant::load_svg_texture(&ctx, &[0xff, 0x00, 0x7f]).is_none());
+    assert!(assistant::load_svg_texture(&ctx, b"").is_none());
+}
+
+#[test]
+fn the_assistant_pane_shows_the_logo_with_an_accessible_name() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = composing_harness(app());
+    h.run_steps(2);
+    h.get_by_label("Mirai logo");
 }

@@ -210,6 +210,22 @@ pub(super) fn account(app: &mut SlideApp, ui: &mut Ui) {
                 })
                 .response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Appearance"));
+            let current = app.ui.color_theme;
+            let mut picked = current;
+            craft_ui::ComboBox::from_id_salt("backstage_color_theme")
+                .width(260.0)
+                .selected_text(if current == theme::ColorTheme::Mirai { "Mirai Theme" } else { "Default" })
+                .show_ui(ui, |ui| {
+                    for (value, label) in [(theme::ColorTheme::Default, "Default"), (theme::ColorTheme::Mirai, "Mirai Theme")] {
+                        ui.selectable_value(&mut picked, value, label);
+                    }
+                })
+                .response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Color theme"));
+            if picked != current {
+                let _ = app.run("view.theme", json!({"theme": picked.name()}));
+            }
+            dim(ui, "Mirai Theme is always dark; the appearance setting applies to Default.");
             ui.add_space(16.0);
             heading(ui, "User Information");
             dim(ui, "DeckCraft has no accounts: there is nothing to sign in to, and your presentations stay on your device.");

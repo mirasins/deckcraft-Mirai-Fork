@@ -1,6 +1,6 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (proposals can create slides, add text boxes, set a solid background and move or resize captured text shapes; preview and undoable apply) · **Validation:** offline tests; no live-account request.
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (original Mirai logo and two-step Enter confirmation; bounded slide proposals) · **Validation:** offline tests; no live-account request.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
 text shapes or in the current slide's eligible text shapes. It can also propose a short list of
@@ -68,8 +68,11 @@ are read by the app or logged. Tools and MCP servers are disabled, sessions are 
 input, output, execution time and process lifetime are bounded. Browser builds report unavailable.
 
 **Consent before sending.** Selected slide text, or the current slide's text when that scope is
-chosen, and the instruction are sent only after you confirm the request. Context size is bounded
-by the limits above.
+chosen, and the instruction are sent only after you confirm the request. Enter in the instruction
+field reviews the request (Shift+Enter adds a line); a second Enter, or Confirm and send, sends it.
+Send and Confirm and send work the same way with the button. Any change to the document, slide,
+selection, scope, instruction or model cancels the review. Enter is ignored while an IME composition
+is in progress. Context size is bounded by the limits above.
 
 Treat model output as untrusted data until you review it. Proposals remain in memory. No live-account
 check was run for this port; tests use local fixtures, including headless panel screenshots without a
@@ -79,6 +82,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | Added the original Mirai logo and two-step Enter confirmation, bound to the document revision; no live-account or real-IME check. |
 | 2026-10-29 | minor | Slide operations in proposals (new Blank, Title or Title and Content slides, text boxes, solid background, text and position/size of captured text shapes), listed on the card in readable lines, applied in one undo step with undo and redo; limits of 1 to 100 operations and 64 KiB; an empty operation list, stale proposals and mixed text/slide answers are rejected. Review pass: engine, protocol and UI tests cover several slides with distributed content, an empty starting slide, edits to an existing slide, rejection without partial changes, and atomic undo/redo; the card’s operation lines are asserted by a UI test and a headless screenshot was generated. No live-account request. |
 | 2026-10-28 | minor | Editable contextual proposal card on the slide, undoable apply and slide-switch consent reset. |
 | 2026-10-26 | minor | First selected/current-slide Mirai pane, standalone official-Claude transport, revision-checked text apply and offline tests. |

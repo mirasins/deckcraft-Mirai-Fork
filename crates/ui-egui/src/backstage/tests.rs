@@ -179,6 +179,24 @@ fn every_page_renders() {
     assert!(h.state_mut().run("app.backstage", json!({"page": "share"})).is_err(), "Share (cloud) isn't offered");
 }
 
+/// File › Account's colour-theme selector applies Mirai to the whole UI.
+#[test]
+fn account_page_selects_and_applies_mirai_theme() {
+    let mut h = harness(new_app());
+    h.state_mut().run("app.backstage", json!({"page": "account"})).unwrap();
+    h.run_steps(3);
+
+    let selector = h.get_by_role_and_label(Role::ComboBox, "Color theme");
+    assert_eq!(selector.value().as_deref(), Some("Default"));
+    selector.click();
+    h.run_steps(2);
+    h.get_by_label("Mirai Theme").click();
+    h.run_steps(3);
+
+    assert_eq!(h.state().ui.color_theme, crate::theme::ColorTheme::Mirai);
+    assert_eq!(crate::theme::Tokens::get(&h.ctx).accent, crate::theme::Tokens::mirai().accent, "the selected theme is applied to the UI");
+}
+
 /// A starter template from File › New opens its deck and leaves the File tab.
 #[test]
 fn new_template_opens_a_starter_deck() {

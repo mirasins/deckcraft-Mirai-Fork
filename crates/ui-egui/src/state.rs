@@ -51,6 +51,8 @@ pub enum ViewMode {
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
     pub brightness: theme::Brightness,
+    /// The colour theme: `default` follows `brightness`; `mirai` is the Mirai Theme.
+    pub color_theme: theme::ColorTheme,
     pub tab: String,
     pub ribbon_collapsed: bool,
     pub view: ViewMode,
@@ -97,6 +99,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             brightness: theme::Brightness::Light,
+            color_theme: theme::ColorTheme::Default,
             tab: "Home".into(),
             ribbon_collapsed: false,
             view: ViewMode::Normal,

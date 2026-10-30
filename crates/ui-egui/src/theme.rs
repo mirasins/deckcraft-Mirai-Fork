@@ -11,6 +11,34 @@ pub enum Brightness {
     Dark,
 }
 
+/// The interface colour theme. `Default` follows [`Brightness`]; `Mirai` is a dark, violet theme
+/// of our own and ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorTheme {
+    Mirai,
+    #[default]
+    #[serde(other)]
+    Default,
+}
+
+impl ColorTheme {
+    /// The name the `view.theme` command takes.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "default" => Some(Self::Default),
+            "mirai" => Some(Self::Mirai),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Mirai => "mirai",
+        }
+    }
+}
+
 /// Every colour the chrome uses.
 #[derive(Clone, Copy, Debug)]
 pub struct Tokens {
@@ -117,19 +145,69 @@ impl Tokens {
             shadow: Color32::from_black_alpha(90),
         }
     }
+    /// Mirai Theme: a dark violet interface. Text and accent pairs keep WCAG AA contrast (4.5:1 for
+    /// text, 3:1 for controls); the tests check them.
+    pub fn mirai() -> Self {
+        Tokens {
+            dark: true,
+            chrome: Color32::from_rgb(0x17, 0x11, 0x24),
+            card: Color32::from_rgb(0x24, 0x1C, 0x36),
+            card_border: Color32::from_rgb(0x3A, 0x2E, 0x55),
+            text_field: Color32::from_rgb(0x1D, 0x16, 0x2D),
+            canvas: Color32::from_rgb(0x12, 0x0D, 0x1C),
+            text: Color32::from_rgb(0xF3, 0xEE, 0xFF),
+            text_dim: Color32::from_rgb(0xC9, 0xBE, 0xE3),
+            text_faint: Color32::from_rgb(0x9C, 0x90, 0xB8),
+            border: Color32::from_rgb(0x4B, 0x3D, 0x6B),
+            separator: Color32::from_rgb(0x3A, 0x2E, 0x55),
+            hover: Color32::from_rgb(0x33, 0x28, 0x4B),
+            pressed: Color32::from_rgb(0x3F, 0x32, 0x5C),
+            selected: Color32::from_rgb(0x3A, 0x2E, 0x55),
+            accent: Color32::from_rgb(0xB3, 0x8C, 0xFF),
+            accent_text: Color32::from_rgb(0x14, 0x0E, 0x22),
+            contextual: Color32::from_rgb(0xD2, 0xB8, 0xFF),
+            selection: Color32::from_rgb(0x9C, 0x90, 0xB8),
+            handle_fill: Color32::from_rgb(0xF3, 0xEE, 0xFF),
+            handle_stroke: Color32::from_rgb(0x7A, 0x6A, 0x9C),
+            guide: Color32::from_rgb(0xD2, 0xB8, 0xFF),
+            caret: Color32::from_rgb(0xF3, 0xEE, 0xFF),
+            text_selection: Color32::from_rgba_unmultiplied(0xB3, 0x8C, 0xFF, 90),
+            field_bg: Color32::from_rgb(0x1D, 0x16, 0x2D),
+            control: Color32::from_rgb(0x2E, 0x25, 0x44),
+            control_hover: Color32::from_rgb(0x3F, 0x32, 0x5C),
+            control_pressed: Color32::from_rgb(0x4B, 0x3D, 0x6B),
+            shadow: Color32::from_black_alpha(120),
+        }
+    }
     pub fn for_brightness(b: Brightness) -> Self {
         match b {
             Brightness::Light => Self::light(),
             Brightness::Dark => Self::dark(),
         }
     }
+    /// The tokens for the saved settings: the colour theme, and the brightness when it is `Default`.
+    pub fn for_settings(b: Brightness, theme: ColorTheme) -> Self {
+        match theme {
+            ColorTheme::Default => Self::for_brightness(b),
+            ColorTheme::Mirai => Self::mirai(),
+        }
+    }
+    /// The tokens last applied with [`apply`]; before that, the light or dark defaults.
     pub fn get(ctx: &egui::Context) -> Self {
+        if let Some(t) = ctx.data(|d| d.get_temp::<Tokens>(applied_id())) {
+            return t;
+        }
         if ctx.global_style().visuals.dark_mode { Self::dark() } else { Self::light() }
     }
 }
 
+fn applied_id() -> egui::Id {
+    egui::Id::unique("deckcraft-applied-tokens")
+}
+
 /// Apply tokens to egui's style.
 pub fn apply(ctx: &egui::Context, t: &Tokens) {
+    ctx.data_mut(|d| d.insert_temp(applied_id(), *t));
     let mut v = if t.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = t.chrome;
     v.window_fill = t.card;
@@ -481,5 +559,60 @@ mod tests {
         for (c, size, ink) in drawn("\u{2013}\u{2014}-_\u{2026}\u{2022}\u{00b7}\u{2018}\u{2019}\u{201c}\u{201d}=~") {
             assert!(ink, "{c:?} ({:04X}) draws nothing at {size} px", c as u32);
         }
+    }
+
+    fn channel(v: u8) -> f32 {
+        let c = f32::from(v) / 255.0;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }
+
+    fn luminance(c: Color32) -> f32 {
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn mirai_theme_text_and_controls_meet_contrast_targets() {
+        let t = Tokens::mirai();
+        assert!(t.dark, "Mirai Theme is a dark interface");
+        for (name, text) in [("text", t.text), ("text_dim", t.text_dim), ("text_faint", t.text_faint)] {
+            for (bg_name, bg) in [("card", t.card), ("chrome", t.chrome), ("canvas", t.canvas)] {
+                let r = contrast(text, bg);
+                assert!(r >= 4.5, "{name} on {bg_name} is {r:.2}:1, below 4.5:1");
+            }
+        }
+        let r = contrast(t.accent_text, t.accent);
+        assert!(r >= 4.5, "text on the accent is {r:.2}:1");
+        let r = contrast(t.accent, t.card);
+        assert!(r >= 3.0, "accent on the card is {r:.2}:1, below 3:1");
+        // Unchecked boxes and slider rails have no outline; like the light theme, they must differ
+        // from the card by a visible step rather than a contrast ratio.
+        let diff = [t.control.r().abs_diff(t.card.r()), t.control.g().abs_diff(t.card.g()), t.control.b().abs_diff(t.card.b())];
+        assert!(diff.iter().all(|d| *d >= 8), "control {:?} is too close to the card {:?}", t.control, t.card);
+    }
+
+    #[test]
+    fn mirai_theme_applies_a_dark_visual_style() {
+        let ctx = egui::Context::default();
+        super::apply(&ctx, &Tokens::mirai());
+        assert!(ctx.global_style().visuals.dark_mode);
+        assert_eq!(Tokens::get(&ctx).accent, Tokens::mirai().accent);
+    }
+
+    #[test]
+    fn color_theme_names_round_trip_and_unknown_names_fall_back() {
+        for t in [ColorTheme::Default, ColorTheme::Mirai] {
+            assert_eq!(ColorTheme::from_name(t.name()), Some(t));
+        }
+        assert_eq!(ColorTheme::from_name("neon"), None);
+        let parsed: ColorTheme = serde_json::from_str("\"neon\"").expect("an unknown theme is not a damaged file");
+        assert_eq!(parsed, ColorTheme::Default);
+        assert_eq!(Tokens::for_settings(Brightness::Dark, ColorTheme::Default).chrome, Tokens::dark().chrome);
+        assert_eq!(Tokens::for_settings(Brightness::Light, ColorTheme::Mirai).chrome, Tokens::mirai().chrome);
     }
 }

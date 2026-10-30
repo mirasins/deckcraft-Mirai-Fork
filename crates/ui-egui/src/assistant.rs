@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use deckcraft_assistant::{AuthState, Error, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_STRUCTURE_BYTES, Request, Response};
-use egui::{Color32, CornerRadius, Margin, RichText, Stroke, TextEdit, Ui};
+use egui::{Color32, CornerRadius, Event, ImeEvent, Key, Margin, RichText, Stroke, TextEdit, Ui};
 use serde_json::{Value, json};
 
 use crate::SlideApp;
@@ -62,6 +62,36 @@ struct Proposal {
     response: Response,
 }
 
+/// What the confirmation notice was shown for. Any change to one of these cancels the confirmation,
+/// so a request is only sent with the scope, text and model the user actually reviewed.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Armed {
+    doc: u64,
+    revision: u64,
+    slide: usize,
+    selection: deckcraft_engine::Selection,
+    scope: &'static str,
+    instruction: String,
+    model: String,
+}
+
+/// The confirmation a change would be checked against, from the live session and pane state.
+fn armed_now(app: &SlideApp) -> Option<Armed> {
+    let doc = app.session.active()?;
+    Some(Armed {
+        doc: doc.uid,
+        revision: doc.revision,
+        slide: doc.selection.slide,
+        selection: doc.selection.clone(),
+        scope: app.assistant.scope,
+        instruction: app.assistant.instruction.clone(),
+        model: app.assistant.model.clone(),
+    })
+}
+
+/// The instruction field's id, so the test and the composer agree on it.
+const INSTRUCTION_ID: &str = "assistant-instruction";
+
 /// Ephemeral assistant state on the app. Not saved with the presentation or `ui.json`.
 pub struct State {
     /// The presentation (`uid`) the conversation belongs to.
@@ -69,13 +99,21 @@ pub struct State {
     slide: Option<usize>,
     selection: Option<deckcraft_engine::Selection>,
     scope: &'static str,
-    instruction: String,
+    pub(crate) instruction: String,
     /// Claude model alias or id; empty keeps Claude Code's default.
-    model: String,
-    /// Explicit per-request consent. Reset on send, scope change and slide or presentation switch.
-    consent: bool,
+    pub(crate) model: String,
+    /// Set by the first Enter or Send press; the notice is then shown for this exact state. A
+    /// second Enter or Confirm sends. Cleared by any change, by send and by reset.
+    pub(crate) armed: Option<Armed>,
+    /// An IME composition is in progress in the instruction field.
+    pub(crate) composing: bool,
+    /// The instruction field's id, set while it is drawn.
+    pub(crate) input_id: Option<egui::Id>,
+    /// Enter is ignored up to this frame after an IME event, so a key that committed text cannot
+    /// also act as a send.
+    ime_until: u64,
     connection: Option<AuthState>,
-    message: String,
+    pub(crate) message: String,
     pending: Option<Pending>,
     history: VecDeque<Proposal>,
     next_id: u64,
@@ -92,7 +130,10 @@ impl Default for State {
             scope: "slide",
             instruction: String::new(),
             model: String::new(),
-            consent: false,
+            armed: None,
+            composing: false,
+            ime_until: 0,
+            input_id: None,
             connection: None,
             message: String::new(),
             pending: None,
@@ -329,7 +370,7 @@ fn reset(state: &mut State) {
         pending.cancel.store(true, Ordering::Relaxed);
     }
     state.instruction.clear();
-    state.consent = false;
+    state.armed = None;
     state.message.clear();
     state.history.clear();
 }
@@ -339,6 +380,13 @@ fn reset(state: &mut State) {
 pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
     if app.assistant.wake.is_none() {
         app.assistant.wake = Some(ctx.clone());
+    }
+    if app.assistant.armed.is_some() && app.assistant.armed != armed_now(app) {
+        app.assistant.armed = None;
+        app.assistant.message = "The request changed, so the confirmation was cancelled. Press Enter again to review it.".into();
+    }
+    if app.ui.pane.as_deref() != Some(PANE) {
+        app.assistant.armed = None;
     }
     let current = app.session.active().map(|d| (d.uid, d.selection.slide));
     let selection = app.session.active().map(|d| d.selection.clone());
@@ -353,7 +401,7 @@ pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
             app.assistant.message = "The presentation changed, so the request was cancelled.".into();
         }
     } else if app.assistant.slide != slide {
-        app.assistant.consent = false;
+        app.assistant.armed = None;
         if let Some(pending) = app.assistant.pending.take() {
             pending.cancel.store(true, Ordering::Relaxed);
             app.assistant.message = "The slide changed, so the request was cancelled. Text already sent cannot be retracted.".into();
@@ -361,7 +409,7 @@ pub fn logic(app: &mut SlideApp, ctx: &egui::Context) {
         app.assistant.slide = slide;
     }
     if app.assistant.selection != selection {
-        app.assistant.consent = false;
+        app.assistant.armed = None;
         app.assistant.selection = selection;
     }
     if app.assistant.pending.is_some() && app.ui.pane.as_deref() != Some(PANE) {
@@ -473,7 +521,11 @@ fn status(app: &SlideApp) -> Value {
 
 /// A button press in the pane, run after the pane is drawn.
 enum Act {
+    /// Shows the confirmation notice for the current state.
+    Arm,
+    /// Sends the request; only valid while the notice is shown for the current state.
     Send,
+    Disarm,
     Cancel,
     Apply(u64),
     Dismiss(u64),
@@ -484,17 +536,19 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let shapes = app.session.active().map(|d| d.selection.shapes.len()).unwrap_or(0);
     let current = app.session.active().map(|d| (d.uid, d.selection.slide));
+    let armed_current = armed_now(app);
     let mut action: Option<Act> = None;
     let state = &mut app.assistant;
     let busy = state.pending.is_some();
     ui.spacing_mut().item_spacing.y = 8.0;
+    brand_header(ui, &t);
     status_line(ui, state, &t);
     scope_chooser(ui, state, shapes, &t);
     if !state.message.is_empty() {
         notice(ui, &state.message, &t);
     }
     egui::Panel::bottom("assistant-composer").frame(egui::Frame::NONE).show(ui, |ui| {
-        composer(ui, state, busy, &mut action, &t);
+        composer(ui, state, busy, armed_current.as_ref(), &mut action, &t);
     });
     egui::ScrollArea::vertical().id_salt("assistant-history").auto_shrink([false, false]).show(ui, |ui| {
         if let Some(pending) = &state.pending {
@@ -520,12 +574,21 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     });
     match action {
         None => {}
+        Some(Act::Arm) => {
+            app.assistant.armed = armed_now(app);
+            app.assistant.message.clear();
+        }
+        Some(Act::Disarm) => app.assistant.armed = None,
         Some(Act::Send) => {
-            let consent = std::mem::take(&mut app.assistant.consent);
+            let armed = app.assistant.armed.take();
+            if armed.is_none() || armed != armed_now(app) {
+                app.assistant.message = "The request changed, so the confirmation was cancelled. Review it again.".into();
+                return;
+            }
             let instruction = app.assistant.instruction.clone();
             let model = app.assistant.model.clone();
             let scope = app.assistant.scope;
-            let result = app.run("ui.assistant.request", json!({"instruction": instruction, "scope": scope, "model": model, "confirm": consent}));
+            let result = app.run("ui.assistant.request", json!({"instruction": instruction, "scope": scope, "model": model, "confirm": true}));
             match result {
                 Ok(_) => app.assistant.instruction.clear(),
                 Err(error) => app.assistant.message = error,
@@ -536,6 +599,42 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         }
         Some(Act::Apply(id)) => apply(app, id),
         Some(Act::Dismiss(id)) => app.assistant.history.retain(|p| p.id != id),
+    }
+}
+
+const BRAND_SVG: &[u8] = include_bytes!("../../../assets/assistant/mirai-gorrion.svg");
+const BRAND_HEIGHT: u32 = 64;
+
+/// The logo texture, rasterised once per egui context. `None` means the SVG could not be loaded and
+/// the text fallback is shown instead.
+#[derive(Clone)]
+struct Brand(Option<egui::TextureHandle>);
+
+pub(crate) fn brand(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique("mirai-assistant-brand");
+    if let Some(cached) = ctx.data(|d| d.get_temp::<Brand>(id)) {
+        return cached.0;
+    }
+    let texture = load_svg_texture(ctx, BRAND_SVG);
+    ctx.data_mut(|d| d.insert_temp(id, Brand(texture.clone())));
+    texture
+}
+
+pub(crate) fn load_svg_texture(ctx: &egui::Context, svg: &[u8]) -> Option<egui::TextureHandle> {
+    let size = egui::SizeHint::Height(BRAND_HEIGHT);
+    let image = egui_extras::image::load_svg_bytes_with_size(svg, size, &Default::default()).ok()?;
+    Some(crate::textures::upload(ctx, "mirai-assistant-brand", image))
+}
+
+fn brand_header(ui: &mut Ui, t: &Tokens) {
+    match brand(ui.ctx()) {
+        Some(texture) => {
+            let image = egui::Image::new(&texture).max_height(BRAND_HEIGHT as f32).alt_text("Mirai logo");
+            ui.add(image);
+        }
+        None => {
+            ui.label(RichText::new("Mirai").strong().color(accent_text(t)));
+        }
     }
 }
 
@@ -566,7 +665,7 @@ fn scope_chooser(ui: &mut Ui, state: &mut State, shapes: usize, t: &Tokens) {
         for (value, label) in SCOPES {
             if ui.selectable_label(state.scope == value, label).clicked() && state.scope != value {
                 state.scope = value;
-                state.consent = false;
+                state.armed = None;
             }
         }
     });
@@ -587,10 +686,34 @@ fn notice(ui: &mut Ui, text: &str, t: &Tokens) {
     });
 }
 
-fn composer(ui: &mut Ui, state: &mut State, busy: bool, action: &mut Option<Act>, t: &Tokens) {
+fn composer(ui: &mut Ui, state: &mut State, busy: bool, current: Option<&Armed>, action: &mut Option<Act>, t: &Tokens) {
+    let input_id = ui.make_persistent_id(INSTRUCTION_ID);
+    state.input_id = Some(input_id);
+    let focused = ui.memory(|m| m.has_focus(input_id));
+    let frame = ui.ctx().cumulative_frame_nr();
+    let ime: Vec<ImeEvent> = ui.input(|i| i.events.iter().filter_map(|e| if let Event::Ime(ev) = e { Some(ev.clone()) } else { None }).collect());
+    for event in &ime {
+        state.ime_until = frame.saturating_add(2);
+        match event {
+            ImeEvent::Preedit { text, .. } => state.composing = !text.is_empty(),
+            ImeEvent::Commit(_) => state.composing = false,
+            _ => {}
+        }
+    }
+    if !focused {
+        state.composing = false;
+    }
+    let plain_enter = focused && !busy && !state.composing && frame > state.ime_until;
+    let enter = if plain_enter { ui.input_mut(|i| take_plain_enter(&mut i.events)) } else { None };
+    let ready = !state.instruction.trim().is_empty();
+    if enter == Some(false) && ready {
+        let confirmed = state.armed.as_ref().is_some_and(|armed| Some(armed) == current);
+        *action = Some(if confirmed { Act::Send } else { Act::Arm });
+    }
     ui.add_enabled_ui(!busy, |ui| {
         ui.add(
             TextEdit::multiline(&mut state.instruction)
+                .id(input_id)
                 .hint_text("What should change? For example: shorten the bullets.")
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
@@ -598,17 +721,51 @@ fn composer(ui: &mut Ui, state: &mut State, busy: bool, action: &mut Option<Act>
         clamp_bytes(&mut state.instruction, MAX_INSTRUCTION_BYTES);
         ui.add(TextEdit::singleline(&mut state.model).hint_text("Model (optional): Claude Code's default").desired_width(f32::INFINITY));
         clamp_bytes(&mut state.model, MAX_MODEL_BYTES);
-        ui.checkbox(&mut state.consent, "Send the instruction, chosen text and shape descriptions to Claude Code for this request");
-        ui.horizontal(|ui| {
-            let ready = state.consent && !state.instruction.trim().is_empty();
-            if ui.add_enabled(ready, egui::Button::new("Send")).clicked() {
-                *action = Some(Act::Send);
-            }
-            if !ready {
-                ui.label(RichText::new("Tick the box and write a request.").small().color(t.text_dim));
-            }
-        });
+        let confirmed = state.armed.as_ref().is_some_and(|armed| Some(armed) == current);
+        if confirmed {
+            let what = if state.scope == "selection" { "the selected text shapes" } else { "the text shapes on this slide" };
+            let model = if state.model.trim().is_empty() { String::new() } else { format!(" with model {}", state.model.trim()) };
+            notice(
+                ui,
+                &format!(
+                    "Confirm before sending: your instruction, the original text and shape descriptions of {what} go to Claude Code{model}. Press Enter again or choose Confirm and send. Any change cancels this."
+                ),
+                t,
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Confirm and send").clicked() {
+                    *action = Some(Act::Send);
+                }
+                if ui.button("Cancel").clicked() {
+                    *action = Some(Act::Disarm);
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(ready, egui::Button::new("Send")).clicked() {
+                    *action = Some(Act::Arm);
+                }
+                if !ready {
+                    ui.label(RichText::new("Write a request to send it.").small().color(t.text_dim));
+                } else {
+                    ui.label(RichText::new("Enter reviews the request; Enter again sends. Shift+Enter adds a line.").small().color(t.text_dim));
+                }
+            });
+        }
     });
+}
+
+/// Removes the first plain Enter press (no modifiers) from this frame's events, so the text field
+/// never also inserts a line for it. Returns whether that press was a key repeat.
+fn take_plain_enter(events: &mut Vec<Event>) -> Option<bool> {
+    let index = events.iter().position(|e| {
+        matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. }
+            if !(modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd))
+    })?;
+    match events.remove(index) {
+        Event::Key { repeat, .. } => Some(repeat),
+        _ => None,
+    }
 }
 
 /// Keeps a text field within `max` bytes, cut on a character boundary.
@@ -830,16 +987,25 @@ mod slide_consent_tests {
     use super::*;
 
     #[test]
+    fn document_edit_invalidates_notice_without_selection_change() {
+        let mut app = SlideApp::new(deckcraft_engine::Session::with_new(), crate::Services::default());
+        let before = armed_now(&app).unwrap();
+        app.session.execute("design.background", &json!({"color":"#123456"})).unwrap();
+        let after = armed_now(&app).unwrap();
+        assert!(before != after);
+    }
+
+    #[test]
     fn changing_selection_clears_consent_on_same_slide() {
         let mut session = deckcraft_engine::Session::with_new();
         deckcraft_engine::sample::open_sample(&mut session).unwrap();
         let mut app = SlideApp::new(session, crate::Services::default());
         let ctx = egui::Context::default();
         logic(&mut app, &ctx);
-        app.assistant.consent = true;
+        app.assistant.armed = armed_now(&app);
         app.session.active_mut().unwrap().selection.shapes.push(deckcraft_model::ShapeId(999));
         logic(&mut app, &ctx);
-        assert!(!app.assistant.consent);
+        assert!(app.assistant.armed.is_none());
     }
 
     #[test]
@@ -911,11 +1077,11 @@ mod slide_consent_tests {
             deck: None,
         };
         preview_proposal(&mut app, "Shorten", context, response).unwrap();
-        app.assistant.consent = true;
+        app.assistant.armed = armed_now(&app);
         let original_slide = app.session.active().unwrap().selection.slide;
         app.session.active_mut().unwrap().selection.slide = original_slide.saturating_add(1);
         logic(&mut app, &ctx);
-        assert!(!app.assistant.consent);
+        assert!(app.assistant.armed.is_none());
         assert!(cancel.load(Ordering::Relaxed));
         assert!(app.assistant.pending.is_none());
         assert_eq!(app.assistant.history.len(), 1);

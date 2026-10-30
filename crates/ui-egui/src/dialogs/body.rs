@@ -1343,6 +1343,25 @@ fn dlg_preferences(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     if ui.checkbox(&mut dark, "Dark appearance").changed() {
         let _ = app.run("view.dark", json!({"on": dark}));
     }
+    let current = app.ui.color_theme;
+    let mut picked = current;
+    ui.horizontal(|ui| {
+        let label = ui.label("Color theme");
+        craft_ui::ComboBox::from_id_salt("preferences_color_theme")
+            .selected_text(if current == theme::ColorTheme::Mirai { "Mirai Theme" } else { "Default" })
+            .show_ui(ui, |ui| {
+                for (value, text) in [(theme::ColorTheme::Default, "Default"), (theme::ColorTheme::Mirai, "Mirai Theme")] {
+                    ui.selectable_value(&mut picked, value, text);
+                }
+            })
+            .response
+            .labelled_by(label.id);
+    });
+    if picked != current {
+        let _ = app.run("view.theme", json!({"theme": picked.name()}));
+    }
+    let theme_note = Tokens::get(ui.ctx()).text_dim;
+    ui.label(egui::RichText::new("Mirai Theme is always dark; the appearance setting applies to Default.").color(theme_note));
     // While the pointer holds the slider its value only waits in the dialog: applying it
     // would rescale the slider under the pointer and run it to an end (#767). It applies
     // on release, and at once from the keyboard.

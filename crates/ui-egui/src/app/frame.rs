@@ -18,7 +18,7 @@ impl SlideApp {
             return false;
         }
         if self.restyle {
-            theme::apply(ctx, &theme::Tokens::for_brightness(self.ui.brightness));
+            theme::apply(ctx, &theme::Tokens::for_settings(self.ui.brightness, self.ui.color_theme));
             self.restyle = false;
         }
         self.fonts_ready = true;

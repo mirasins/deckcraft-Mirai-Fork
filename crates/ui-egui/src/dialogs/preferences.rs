@@ -4,6 +4,7 @@ use super::{Dialog, SlideApp, Value, json, theme};
 pub(super) fn preferences_snapshot(app: &SlideApp) -> Value {
     json!({
         "dark": app.ui.brightness == theme::Brightness::Dark,
+        "colorTheme": app.ui.color_theme.name(),
         "uiScale": app.ui.ui_scale,
         "prefs": serde_json::to_value(&app.session.prefs).unwrap_or(Value::Null),
     })
@@ -16,6 +17,12 @@ pub(super) fn restore_preferences(app: &mut SlideApp, d: &Dialog) {
         && dark != (app.ui.brightness == theme::Brightness::Dark)
     {
         let _ = app.run("view.dark", json!({ "on": dark }));
+    }
+    if let Some(name) = before.get("colorTheme").and_then(Value::as_str)
+        && let Some(color_theme) = theme::ColorTheme::from_name(name)
+        && color_theme != app.ui.color_theme
+    {
+        let _ = app.run("view.theme", json!({ "theme": color_theme.name() }));
     }
     if let Some(scale) = before.get("uiScale").and_then(Value::as_f64) {
         app.ui.ui_scale = scale as f32;
