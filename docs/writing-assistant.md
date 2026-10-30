@@ -1,6 +1,6 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (bounded presentation-wide text context and atomic changes) · **Validation:** offline tests; no live-account request.
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (shape geometry, fills and lines in slide proposals) · **Validation:** offline tests; no live-account request.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
 text shapes, in the current slide, or across the presentation. It can also propose a short list of
@@ -25,7 +25,7 @@ to the original slide and newly created slides. It does not run commands produce
    they were created.
 
 The engine commands `assistant.context`, `assistant.apply`, `assistant.presentationContext`,
-`assistant.applyPresentation` and `assistant.applyDeck` own the snapshot
+`assistant.applyPresentation`, `assistant.geometryContext` and `assistant.applyDeck` own the snapshot
 and validation.
 
 ## Slide operations
@@ -52,7 +52,7 @@ Rules:
   positive width and height.
 - Set text and set position may address only text shapes captured in the original slide's context,
   and they must come before any new slide. Operations after a new slide apply to that new slide.
-- Only these five operations are accepted. Model output is never executed, and it is never treated
+- Only these five operations are accepted from a model answer. Model output is never executed, and it is never treated
   as Markdown or as commands.
 - The whole list applies as **one undoable step**. Undo restores the slide and its shapes as they
   were before the apply.
@@ -64,6 +64,40 @@ Masters, layouts, notes, handouts, groups, tables, pictures, charts, fields, lin
 non-plain content are outside this version; explicit current-slide scope reports skipped shapes.
 Plain text keeps the standard text-set paragraph/first-run formatting and fit behavior.
 Programmatic requests require `confirm: true`.
+
+### Shape geometry and fills (engine, first step)
+
+The engine can read and change unlocked, text-free autoshapes on the current slide. For a
+slide-scope request the pane sends this context to the model as `geometry`, so the model may
+propose `set_shape_bounds`, `set_shape_fill` and `add_shape` alongside text edits; for selection
+or presentation scope no geometry is sent. The same operations are always available through the
+engine (MCP, CLI and the control channel).
+
+- `assistant.geometryContext` is read-only. It lists up to 256 shapes with `index`, `shape`, `label`,
+  `preset`, `rect` (`[x, y, w, h]` in points) and `fill` (`#RRGGBB` for a plain solid fill, otherwise
+  `null`). Closed shapes, lines, arcs and connector presets are listed. Pictures, groups, attached
+  connectors, tables, charts, media, placeholders, text boxes, shapes with text, locked shapes,
+  presets whose name isn't plain letters and digits, and shapes past the 256th are not listed;
+  `skipped` counts them. Labels have control characters and line or paragraph separators replaced
+  by spaces. Its indices are a separate space from
+  the text targets of `assistant.context`.
+- Pass the snapshot as `geometry` next to `context` and `deck`. The operations are:
+  - `set_shape_bounds {shape, rect}`: moves and resizes a listed shape;
+  - `set_shape_fill {shape, color}`: sets a plain `#RRGGBB` fill; on a line, arc or connector preset
+    it sets the line colour instead;
+  - `add_shape {preset, rect, color?}`: creates a shape from the gallery, with an optional fill (the
+    line colour for a line, arc or connector). It needs no geometry snapshot. The created shape is
+    left unselected.
+  - A line's box runs from its start to its end and may be flat (zero width or height, not both);
+    every other shape needs a positive width and height.
+- In the pane, a slide-scope request whose geometry can't be read still runs, without shape
+  operations; an answer whose `add_shape` names a preset outside the gallery, or a flat closed shape,
+  is not offered. The pane sends textual geometry (labels, presets, rectangles, plain fills) only:
+  no slide image or screenshot is sent, and Claude Code never receives one. Changing the slide
+  after a proposal cancels it, so a proposal is only applied with the user's explicit consent.
+- As above, everything is validated before the first change; a snapshot that is stale, names a
+  locked or changed shape, or repeats one is refused; the whole list is one undoable step; and a shape
+  operation after a new slide is refused.
 
 ## Account and privacy
 
@@ -88,6 +122,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Engine, protocol and pane: `assistant.geometryContext` lists unlocked text-free autoshapes (lines, arcs and connector presets included) with their own indices; `assistant.applyDeck` accepts `set_shape_bounds`, `set_shape_fill` and `add_shape`, validated before any change and undoable in one step; a line's colour is its stroke and its box may be flat. Offline tests only. |
 | 2026-10-29 | minor | An add_text operation can carry a style (bold, italic, size 1 to 400 pt, #RRGGBB colour) applied to the whole text box; styles are validated at the protocol and in the engine, listed on the card, and undo stays one step. Existing shapes keep their formatting; no live-account request. |
 | 2026-10-29 | minor | Fixed proposals that were rejected as stale after a selection change or slide navigation: the snapshot revision is now a content revision (selection and navigation don't bump it). Mixed answers (text suggestions and slide operations) are accepted and apply atomically in one undo step; a suggestion and a set-text on the same shape are refused. Presentation-wide snapshots record their slide and apply only from it. Offline tests only. |
 | 2026-10-29 | minor | Added presentation-wide text context and atomic text replacements across slides; text-only, excludes unsupported objects and is bounded to 256 slides/shapes and 64 KiB. Offline tests only. |

@@ -13,6 +13,8 @@ use serde_json::{Map, Value, json};
 use super::{CommandSpec, bad, cmd, has_slide};
 use crate::{Result, Session, Target};
 
+mod geometry;
+
 const CMD_CONTEXT: &str = "assistant.context";
 const CMD_APPLY: &str = "assistant.apply";
 /// Most targets a snapshot holds, and most changes one apply takes.
@@ -29,6 +31,10 @@ pub const MAX_DECK_OPERATIONS: usize = 100;
 pub const MAX_DECK_COORDINATE: f64 = 10_000.0;
 /// Largest accepted font size in a deck text style, in points (mirrors the assistant protocol cap).
 pub const MAX_DECK_FONT_PT: f64 = 400.0;
+/// The command name every deck-proposal check and error reports.
+const CMD_DECK: &str = "assistant.applyDeck";
+/// Every field an `assistant.applyDeck` operation may carry; each kind allows a subset.
+const OPERATION_FIELDS: [&str; 9] = ["kind", "target", "layout", "text", "rect", "color", "style", "shape", "preset"];
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -40,6 +46,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{scope?: selection|slide} (selection: default, the selected top-level text shapes; slide: every nonempty plain text shape on the current slide, up to 256; empty placeholders are skipped) → {document_id, revision, scope, slide_id, slide_index, skipped, targets: [{index, shape, label, original}]}",
             has_slide,
             context
+        ),
+        cmd!(
+            query "assistant.geometryContext",
+            "Writing Assistant Geometry Context",
+            [],
+            None,
+            "{} → {document_id, revision, slide_index, slide_id, skipped, shapes: [{index, shape, label, preset, rect: [x, y, w, h], fill: #RRGGBB|null}]}: unlocked autoshapes without text on the current slide, up to 256; indices are separate from assistant.context targets",
+            has_slide,
+            geometry::context
         ),
         cmd!(
             "assistant.apply",
@@ -55,7 +70,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Mirai Slide Changes",
             [],
             None,
-            "{context: snapshot, deck: {operations: [...]}}; bounded slide, text, geometry and background changes, one undo step",
+            "{context: snapshot, geometry?: snapshot from assistant.geometryContext, deck: {operations: [...]}} → {applied, text_changes}; bounded slide, text, shape and background changes, one undo step; shape operations are set_shape_bounds {shape, rect}, set_shape_fill {shape, color} (shape = geometry index) and add_shape {preset, rect, color?}",
             has_slide,
             apply_deck
         ),
@@ -240,10 +255,16 @@ fn is_empty_placeholder(sh: &Shape) -> bool {
 
 /// At most [`MAX_LABEL_BYTES`] of the name, control characters as spaces, built as it goes so a
 /// long name is never copied whole.
+/// A label character the protocol accepts: control characters, line and paragraph separators and
+/// the object replacement character become spaces.
+fn label_char(c: char) -> char {
+    if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{FFFC}') { ' ' } else { c }
+}
+
 fn label_of(sh: &Shape) -> String {
     let mut out = String::new();
     for c in sh.name.chars() {
-        let c = if c.is_control() { ' ' } else { c };
+        let c = label_char(c);
         if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
             break;
         }
@@ -257,14 +278,14 @@ fn presentation_label_of(sh: &Shape, slide_index: usize) -> String {
     let prefix = format!("Slide {} ", slide_index + 1);
     let mut out = String::new();
     for c in prefix.chars() {
-        let c = if c.is_control() { ' ' } else { c };
+        let c = label_char(c);
         if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
             break;
         }
         out.push(c);
     }
     for c in sh.name.chars() {
-        let c = if c.is_control() { ' ' } else { c };
+        let c = label_char(c);
         if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
             break;
         }
@@ -593,186 +614,369 @@ fn apply(s: &mut Session, v: &Value) -> Result<Value> {
 /// operations; model output is never a command name. Checks run before the first edit, and the
 /// outer command guard rolls back all nested edits on failure, so the whole answer is one undo step.
 fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
-    const CMD: &str = "assistant.applyDeck";
-    let top = object(v, "parameters", &["context", "deck", "changes"], CMD)?;
-    let context = top.get("context").ok_or_else(|| bad(CMD, "missing context"))?;
-    let captured = context.get("targets").and_then(Value::as_array).ok_or_else(|| bad(CMD, "missing targets"))?;
-    if captured.len() > MAX_TARGETS {
-        return Err(bad(CMD, "too many targets"));
-    }
-    let mut captured_bytes = 0usize;
-    for target in captured {
-        let m = object(target, "target", &["index", "shape", "label", "original"], CMD)?;
-        let original = text_field(m, "original", CMD, MAX_TEXT_BYTES)?;
-        text_field(m, "label", CMD, MAX_LABEL_BYTES)?;
-        captured_bytes = captured_bytes.saturating_add(original.len());
-        if captured_bytes > MAX_TEXT_BYTES {
-            return Err(bad(CMD, "context is too large"));
-        }
-    }
+    let top = object(v, "parameters", &["context", "deck", "changes", "geometry"], CMD_DECK)?;
+    let context = top.get("context").ok_or_else(|| bad(CMD_DECK, "missing context"))?;
+    check_captured(context)?;
     let changes = top.get("changes").cloned().unwrap_or_else(|| json!([]));
     let req = parse(&json!({"context": context, "changes": changes}))?;
     let st = s.doc()?;
     if st.uid != req.document_id || st.content_revision != req.revision || st.selection.slide != req.slide_index {
-        return Err(bad(CMD, "stale context or different current slide"));
+        return Err(bad(CMD_DECK, "stale context or different current slide"));
     }
     check_targets(s, &req)?;
     let planned = plan(&req)?;
-    let deck = object(top.get("deck").ok_or_else(|| bad(CMD, "missing deck"))?, "deck", &["operations"], CMD)?;
-    let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(CMD, "operations must be an array"))?;
+    let geo = top.get("geometry").map(|g| geometry::parse(g, CMD_DECK)).transpose()?;
+    if let Some(g) = &geo {
+        geometry::check(s, g, CMD_DECK)?;
+    }
+    let deck = object(top.get("deck").ok_or_else(|| bad(CMD_DECK, "missing deck"))?, "deck", &["operations"], CMD_DECK)?;
+    let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(CMD_DECK, "operations must be an array"))?;
     if ops.is_empty() || ops.len() > MAX_DECK_OPERATIONS {
-        return Err(bad(CMD, format!("provide 1 to {MAX_DECK_OPERATIONS} operations")));
+        return Err(bad(CMD_DECK, format!("provide 1 to {MAX_DECK_OPERATIONS} operations")));
     }
-    let replaced: HashSet<ShapeId> = planned.iter().map(|(shape, _)| *shape).collect();
-    let mut total = 0usize;
-    let mut after_new = false;
-    for op in ops {
-        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color", "style"], CMD)?;
-        let kind = text_field(m, "kind", CMD, 32)?;
-        let present = |key: &str| m.get(key).is_some_and(|v| !v.is_null());
-        let allowed = match kind {
-            "new_slide" => {
-                after_new = true;
-                &["layout", "text"][..]
-            }
-            "add_text" => &["rect", "text", "style"][..],
-            "set_text" => &["target", "text"][..],
-            "set_bounds" => &["target", "rect"][..],
-            "background" => &["color"][..],
-            _ => return Err(bad(CMD, "unknown operation")),
-        };
-        if ["target", "layout", "text", "rect", "color", "style"].iter().any(|key| present(key) && !allowed.contains(key)) {
-            return Err(bad(CMD, "unexpected operation field"));
-        }
-        if kind == "new_slide" {
-            let layout = text_field(m, "layout", CMD, 32)?;
-            if !matches!(layout, "blank" | "title" | "titleAndContent") {
-                return Err(bad(CMD, "invalid layout"));
-            }
-        }
-        if matches!(kind, "set_text" | "set_bounds") {
-            if after_new {
-                return Err(bad(CMD, "original targets cannot be edited after creating a slide"));
-            }
-            let target = usize::try_from(uint(m, "target", CMD)?).map_err(|_| bad(CMD, "invalid target"))?;
-            let shape = req.targets.get(target).ok_or_else(|| bad(CMD, "target outside captured slide"))?.shape;
-            if kind == "set_text" && replaced.contains(&shape) {
-                return Err(bad(CMD, "a target can't get both a text suggestion and a set_text operation"));
-            }
-        }
-        if matches!(kind, "add_text" | "set_text") || (kind == "new_slide" && present("text")) {
-            let text = text_field(m, "text", CMD, MAX_TEXT_BYTES)?;
-            total = total.saturating_add(text.len());
-            if total > MAX_TEXT_BYTES || !plain_ok(text) {
-                return Err(bad(CMD, "invalid or oversized text"));
-            }
-        }
-        if matches!(kind, "add_text" | "set_bounds") {
-            let rect = m.get("rect").and_then(Value::as_array).filter(|r| r.len() == 4).ok_or_else(|| bad(CMD, "rect must contain four numbers"))?;
-            for (i, n) in rect.iter().enumerate() {
-                let n = n.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n <= MAX_DECK_COORDINATE).ok_or_else(|| bad(CMD, "invalid rect"))?;
-                if i >= 2 && n <= 0.0 {
-                    return Err(bad(CMD, "size must be positive"));
-                }
-            }
-        }
-        if kind == "background" {
-            let color = text_field(m, "color", CMD, 7)?;
-            if !is_hex_color(color) {
-                return Err(bad(CMD, "color must be #RRGGBB"));
-            }
-        }
-        if kind == "add_text" && present("style") {
-            let style = object(m.get("style").ok_or_else(|| bad(CMD, "missing style"))?, "style", &["bold", "italic", "size", "color"], CMD)?;
-            // The app sends an unset field as an explicit null, so a null is the same as no field.
-            let field = |key: &str| style.get(key).filter(|v| !v.is_null());
-            let mut styled = false;
-            for key in ["bold", "italic"] {
-                if let Some(v) = field(key) {
-                    v.as_bool().ok_or_else(|| bad(CMD, format!("`{key}` must be true or false")))?;
-                    styled = true;
-                }
-            }
-            if let Some(v) = field("size") {
-                v.as_f64().filter(|v| v.is_finite() && (1.0..=MAX_DECK_FONT_PT).contains(v)).ok_or_else(|| bad(CMD, "size must be 1 to 400 pt"))?;
-                styled = true;
-            }
-            if let Some(v) = field("color") {
-                let color = v.as_str().ok_or_else(|| bad(CMD, "`color` must be a string"))?;
-                if !is_hex_color(color) {
-                    return Err(bad(CMD, "color must be #RRGGBB"));
-                }
-                styled = true;
-            }
-            if !styled {
-                return Err(bad(CMD, "a style sets at least one of bold, italic, size and color"));
-            }
-        }
-    }
+    let mut check =
+        DeckCheck { req: &req, geo: geo.as_ref(), replaced: planned.iter().map(|(shape, _)| *shape).collect(), after_new: false, total_text: 0 };
+    check_operations(&mut check, ops)?;
     for (shape, text) in &planned {
         s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
     }
     for op in ops {
-        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color", "style"], CMD)?;
-        let kind = text_field(m, "kind", CMD, 32)?;
-        match kind {
-            "new_slide" => {
-                let mut params = json!({"layout": m.get("layout")});
-                if let Some(text) = m.get("text").and_then(Value::as_str) {
-                    params["title"] = json!(text);
-                }
-                s.execute("slide.new", &params)?;
-                if m.get("layout").and_then(Value::as_str) == Some("blank")
-                    && let Some(text) = m.get("text").and_then(Value::as_str)
-                    && !text.is_empty()
-                {
-                    let size = s.doc()?.doc.slide_size;
-                    let width = if size.width.is_finite() { size.width.max(1.0) } else { 720.0 };
-                    let height = if size.height.is_finite() { size.height.max(1.0) } else { 405.0 };
-                    let x = (width * 0.05).min(36.0);
-                    let y = (height * 0.05).min(24.0);
-                    s.execute("insert.textBox", &json!({"rect": [x, y, (width - 2.0 * x).min(600.0), (height - 2.0 * y).min(60.0)], "text": text}))?;
-                }
-            }
-            "add_text" => {
-                let out = s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
-                let style = m.get("style").filter(|v| !v.is_null());
-                if let Some(style) = style {
-                    let field = |key: &str| style.get(key).filter(|v| !v.is_null());
-                    let id = out.get("id").cloned().ok_or_else(|| bad(CMD, "the new text box has no id"))?;
-                    s.execute("edit.select", &json!({"ids": [id]}))?;
-                    if let Some(v) = field("bold") {
-                        s.execute("format.bold", &json!({"on": v}))?;
-                    }
-                    if let Some(v) = field("italic") {
-                        s.execute("format.italic", &json!({"on": v}))?;
-                    }
-                    if let Some(v) = field("size") {
-                        s.execute("format.size", &json!({"size": v}))?;
-                    }
-                    if let Some(v) = field("color") {
-                        s.execute("format.color", &json!({"color": v}))?;
-                    }
-                    s.execute("edit.select", &json!({"ids": []}))?;
-                }
-            }
-            "background" => {
-                s.execute("design.background", &json!({"color": m.get("color")}))?;
-            }
-            "set_text" | "set_bounds" => {
-                let i = usize::try_from(uint(m, "target", CMD)?).map_err(|_| bad(CMD, "invalid target"))?;
-                let target = req.targets.get(i).ok_or_else(|| bad(CMD, "invalid target"))?;
-                if kind == "set_text" {
-                    s.execute("text.set", &json!({"id": target.shape.0, "text": m.get("text")}))?;
-                } else {
-                    let r = m.get("rect").and_then(Value::as_array).ok_or_else(|| bad(CMD, "invalid rect"))?;
-                    s.execute("shape.setBounds", &json!({"ids": [target.shape.0], "x": r.first(), "y": r.get(1), "w": r.get(2), "h": r.get(3)}))?;
-                }
-            }
-            _ => return Err(bad(CMD, "unknown operation")),
-        }
+        let m = object(op, "operation", &OPERATION_FIELDS, CMD_DECK)?;
+        let kind = text_field(m, "kind", CMD_DECK, 32)?;
+        run_operation(s, &req, geo.as_ref(), m, kind)?;
     }
     Ok(json!({"applied": ops.len(), "text_changes": planned.len()}))
+}
+
+/// What the checks of one deck proposal carry from one operation to the next.
+struct DeckCheck<'a> {
+    req: &'a Request,
+    geo: Option<&'a geometry::Request>,
+    /// Shapes that a text suggestion already replaces.
+    replaced: HashSet<ShapeId>,
+    after_new: bool,
+    total_text: usize,
+}
+
+/// The captured context's size and labels, checked before anything else is read from it.
+fn check_captured(context: &Value) -> Result<()> {
+    let captured = context.get("targets").and_then(Value::as_array).ok_or_else(|| bad(CMD_DECK, "missing targets"))?;
+    if captured.len() > MAX_TARGETS {
+        return Err(bad(CMD_DECK, "too many targets"));
+    }
+    let mut captured_bytes = 0usize;
+    for target in captured {
+        let m = object(target, "target", &["index", "shape", "label", "original"], CMD_DECK)?;
+        let original = text_field(m, "original", CMD_DECK, MAX_TEXT_BYTES)?;
+        text_field(m, "label", CMD_DECK, MAX_LABEL_BYTES)?;
+        captured_bytes = captured_bytes.saturating_add(original.len());
+        if captured_bytes > MAX_TEXT_BYTES {
+            return Err(bad(CMD_DECK, "context is too large"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether an operation field is present and not `null`; the app sends unset fields as `null`.
+fn is_set(m: &Map<String, Value>, key: &str) -> bool {
+    m.get(key).is_some_and(|v| !v.is_null())
+}
+
+/// The fields an operation of this kind may carry, or `None` for an unknown kind.
+fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "new_slide" => &["layout", "text"][..],
+        "add_text" => &["rect", "text", "style"][..],
+        "set_text" => &["target", "text"][..],
+        "set_bounds" => &["target", "rect"][..],
+        "set_shape_bounds" => &["shape", "rect"][..],
+        "set_shape_fill" => &["shape", "color"][..],
+        "add_shape" => &["preset", "rect", "color"][..],
+        "background" => &["color"][..],
+        _ => return None,
+    })
+}
+
+/// Checks every operation in order, so that each one sees what the earlier ones set up.
+fn check_operations(c: &mut DeckCheck, ops: &[Value]) -> Result<()> {
+    for op in ops {
+        let m = object(op, "operation", &OPERATION_FIELDS, CMD_DECK)?;
+        let kind = text_field(m, "kind", CMD_DECK, 32)?;
+        check_operation(c, m, kind)?;
+    }
+    Ok(())
+}
+
+fn check_operation(c: &mut DeckCheck, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    let allowed = allowed_fields(kind).ok_or_else(|| bad(CMD_DECK, "unknown operation"))?;
+    if kind == "new_slide" {
+        c.after_new = true;
+    }
+    if ["target", "layout", "text", "rect", "color", "style", "shape", "preset"].iter().any(|key| is_set(m, key) && !allowed.contains(key)) {
+        return Err(bad(CMD_DECK, "unexpected operation field"));
+    }
+    check_new_slide(m, kind)?;
+    check_captured_target(c, m, kind)?;
+    check_shape_target(c, m, kind)?;
+    check_add_shape(m, kind)?;
+    check_text(c, m, kind)?;
+    check_rect(m, kind, line_operation(c.geo, m, kind))?;
+    check_background(m, kind)?;
+    if kind == "add_text" && is_set(m, "style") {
+        check_style(m)?;
+    }
+    Ok(())
+}
+
+fn check_new_slide(m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if kind == "new_slide" {
+        let layout = text_field(m, "layout", CMD_DECK, 32)?;
+        if !matches!(layout, "blank" | "title" | "titleAndContent") {
+            return Err(bad(CMD_DECK, "invalid layout"));
+        }
+    }
+    Ok(())
+}
+
+/// `set_text` and `set_bounds` address a captured text shape, and come before any new slide.
+fn check_captured_target(c: &DeckCheck, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if !matches!(kind, "set_text" | "set_bounds") {
+        return Ok(());
+    }
+    if c.after_new {
+        return Err(bad(CMD_DECK, "original targets cannot be edited after creating a slide"));
+    }
+    let target = usize::try_from(uint(m, "target", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid target"))?;
+    let shape = c.req.targets.get(target).ok_or_else(|| bad(CMD_DECK, "target outside captured slide"))?.shape;
+    if kind == "set_text" && c.replaced.contains(&shape) {
+        return Err(bad(CMD_DECK, "a target can't get both a text suggestion and a set_text operation"));
+    }
+    Ok(())
+}
+
+/// Shape operations address a geometry snapshot entry, and come before any new slide.
+fn check_shape_target(c: &DeckCheck, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if matches!(kind, "set_shape_bounds" | "set_shape_fill") {
+        if c.after_new {
+            return Err(bad(CMD_DECK, "shape targets cannot be edited after creating a slide"));
+        }
+        let i = usize::try_from(uint(m, "shape", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid shape"))?;
+        geometry::target(c.geo, i, CMD_DECK)?;
+    }
+    if kind == "set_shape_fill" {
+        check_color(m, "color", true)?;
+    }
+    Ok(())
+}
+
+fn check_add_shape(m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if kind != "add_shape" {
+        return Ok(());
+    }
+    let preset = text_field(m, "preset", CMD_DECK, geometry::MAX_PRESET_BYTES)?;
+    if deckcraft_geom::preset::info(preset).is_none() {
+        return Err(bad(CMD_DECK, "preset must be a shape from the shape gallery"));
+    }
+    if is_set(m, "color") {
+        check_color(m, "color", true)?;
+    }
+    Ok(())
+}
+
+/// `#RRGGBB` text in `key`; `required` makes an absent field an error.
+fn check_color(m: &Map<String, Value>, key: &str, required: bool) -> Result<()> {
+    if required || is_set(m, key) {
+        let color = text_field(m, key, CMD_DECK, 7)?;
+        if !is_hex_color(color) {
+            return Err(bad(CMD_DECK, "color must be #RRGGBB"));
+        }
+    }
+    Ok(())
+}
+
+/// Text in an operation counts against the proposal's text budget, and must be plain.
+fn check_text(c: &mut DeckCheck, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if matches!(kind, "add_text" | "set_text") || (kind == "new_slide" && is_set(m, "text")) {
+        let text = text_field(m, "text", CMD_DECK, MAX_TEXT_BYTES)?;
+        c.total_text = c.total_text.saturating_add(text.len());
+        if c.total_text > MAX_TEXT_BYTES || !plain_ok(text) {
+            return Err(bad(CMD_DECK, "invalid or oversized text"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a shape operation works on a line, arc or connector preset: its new shape's preset, or
+/// the preset its geometry entry recorded.
+fn line_operation(geo: Option<&geometry::Request>, m: &Map<String, Value>, kind: &str) -> bool {
+    let preset = match kind {
+        "add_shape" => m.get("preset").and_then(Value::as_str),
+        "set_shape_bounds" | "set_shape_fill" => {
+            m.get("shape").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).and_then(|i| geometry::preset(geo, i))
+        }
+        _ => None,
+    };
+    preset.is_some_and(deckcraft_geom::preset::is_line_like)
+}
+
+/// A box of finite coordinates with a positive size. A line's box may be flat (a horizontal or
+/// vertical line) but not empty.
+fn check_rect(m: &Map<String, Value>, kind: &str, line: bool) -> Result<()> {
+    if matches!(kind, "add_text" | "set_bounds" | "set_shape_bounds" | "add_shape") {
+        let rect = m.get("rect").and_then(Value::as_array).filter(|r| r.len() == 4).ok_or_else(|| bad(CMD_DECK, "rect must contain four numbers"))?;
+        let mut size = [0.0_f64; 2];
+        for (i, n) in rect.iter().enumerate() {
+            let n = n.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n <= MAX_DECK_COORDINATE).ok_or_else(|| bad(CMD_DECK, "invalid rect"))?;
+            if let Some(slot) = i.checked_sub(2).and_then(|j| size.get_mut(j)) {
+                *slot = n;
+            }
+        }
+        let ok = if line { size[0] > 0.0 || size[1] > 0.0 } else { size[0] > 0.0 && size[1] > 0.0 };
+        if !ok {
+            return Err(bad(CMD_DECK, "size must be positive"));
+        }
+    }
+    Ok(())
+}
+
+fn check_background(m: &Map<String, Value>, kind: &str) -> Result<()> {
+    if kind == "background" {
+        check_color(m, "color", true)?;
+    }
+    Ok(())
+}
+
+/// A text box style sets at least one field, each one valid.
+fn check_style(m: &Map<String, Value>) -> Result<()> {
+    let style = object(m.get("style").ok_or_else(|| bad(CMD_DECK, "missing style"))?, "style", &["bold", "italic", "size", "color"], CMD_DECK)?;
+    let field = |key: &str| style.get(key).filter(|v| !v.is_null());
+    let mut styled = false;
+    for key in ["bold", "italic"] {
+        if let Some(v) = field(key) {
+            v.as_bool().ok_or_else(|| bad(CMD_DECK, format!("`{key}` must be true or false")))?;
+            styled = true;
+        }
+    }
+    if let Some(v) = field("size") {
+        v.as_f64().filter(|v| v.is_finite() && (1.0..=MAX_DECK_FONT_PT).contains(v)).ok_or_else(|| bad(CMD_DECK, "size must be 1 to 400 pt"))?;
+        styled = true;
+    }
+    if let Some(v) = field("color") {
+        let color = v.as_str().ok_or_else(|| bad(CMD_DECK, "`color` must be a string"))?;
+        if !is_hex_color(color) {
+            return Err(bad(CMD_DECK, "color must be #RRGGBB"));
+        }
+        styled = true;
+    }
+    if !styled {
+        return Err(bad(CMD_DECK, "a style sets at least one of bold, italic, size and color"));
+    }
+    Ok(())
+}
+
+/// Runs one checked operation. Every operation goes through a command, so the outer guard undoes them all.
+fn run_operation(s: &mut Session, req: &Request, geo: Option<&geometry::Request>, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    match kind {
+        "new_slide" => run_new_slide(s, m),
+        "add_text" => run_add_text(s, m),
+        "set_shape_bounds" | "set_shape_fill" => run_shape(s, geo, m, kind),
+        "add_shape" => run_add_shape(s, m),
+        "background" => s.execute("design.background", &json!({"color": m.get("color")})).map(|_| ()),
+        "set_text" | "set_bounds" => run_captured(s, req, m, kind),
+        _ => Err(bad(CMD_DECK, "unknown operation")),
+    }
+}
+
+fn run_new_slide(s: &mut Session, m: &Map<String, Value>) -> Result<()> {
+    let mut params = json!({"layout": m.get("layout")});
+    if let Some(text) = m.get("text").and_then(Value::as_str) {
+        params["title"] = json!(text);
+    }
+    s.execute("slide.new", &params)?;
+    if m.get("layout").and_then(Value::as_str) == Some("blank")
+        && let Some(text) = m.get("text").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        let size = s.doc()?.doc.slide_size;
+        let width = if size.width.is_finite() { size.width.max(1.0) } else { 720.0 };
+        let height = if size.height.is_finite() { size.height.max(1.0) } else { 405.0 };
+        let x = (width * 0.05).min(36.0);
+        let y = (height * 0.05).min(24.0);
+        s.execute("insert.textBox", &json!({"rect": [x, y, (width - 2.0 * x).min(600.0), (height - 2.0 * y).min(60.0)], "text": text}))?;
+    }
+    Ok(())
+}
+
+fn run_add_text(s: &mut Session, m: &Map<String, Value>) -> Result<()> {
+    let out = s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
+    if let Some(style) = m.get("style").filter(|v| !v.is_null()) {
+        let id = out.get("id").cloned().ok_or_else(|| bad(CMD_DECK, "the new text box has no id"))?;
+        s.execute("edit.select", &json!({"ids": [id]}))?;
+        apply_style(s, style)?;
+        s.execute("edit.select", &json!({"ids": []}))?;
+    }
+    Ok(())
+}
+
+/// Applies the fields a style sets to the selected text box, in the order bold, italic, size, colour.
+fn apply_style(s: &mut Session, style: &Value) -> Result<()> {
+    let field = |key: &str| style.get(key).filter(|v| !v.is_null());
+    if let Some(v) = field("bold") {
+        s.execute("format.bold", &json!({"on": v}))?;
+    }
+    if let Some(v) = field("italic") {
+        s.execute("format.italic", &json!({"on": v}))?;
+    }
+    if let Some(v) = field("size") {
+        s.execute("format.size", &json!({"size": v}))?;
+    }
+    if let Some(v) = field("color") {
+        s.execute("format.color", &json!({"color": v}))?;
+    }
+    Ok(())
+}
+
+fn run_shape(s: &mut Session, geo: Option<&geometry::Request>, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    let i = usize::try_from(uint(m, "shape", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid shape"))?;
+    let id = geometry::target(geo, i, CMD_DECK)?;
+    if kind == "set_shape_fill" {
+        // A line, arc or connector has no inside: its colour is the stroke's.
+        let line = geometry::preset(geo, i).is_some_and(deckcraft_geom::preset::is_line_like);
+        s.execute(if line { "shape.line" } else { "shape.fill" }, &json!({"ids": [id.0], "color": m.get("color")}))?;
+    } else {
+        set_bounds(s, m, id.0)?;
+    }
+    Ok(())
+}
+
+fn run_add_shape(s: &mut Session, m: &Map<String, Value>) -> Result<()> {
+    let out = s.execute("shape.insert", &json!({"preset": m.get("preset"), "rect": m.get("rect")}))?;
+    if let Some(color) = m.get("color").filter(|v| !v.is_null()) {
+        let id = out.get("id").cloned().ok_or_else(|| bad(CMD_DECK, "the new shape has no id"))?;
+        let line = m.get("preset").and_then(Value::as_str).is_some_and(deckcraft_geom::preset::is_line_like);
+        s.execute(if line { "shape.line" } else { "shape.fill" }, &json!({"ids": [id], "color": color}))?;
+    }
+    // Like add_text, the proposal leaves nothing selected.
+    s.execute("edit.select", &json!({"ids": []}))?;
+    Ok(())
+}
+
+fn run_captured(s: &mut Session, req: &Request, m: &Map<String, Value>, kind: &str) -> Result<()> {
+    let i = usize::try_from(uint(m, "target", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid target"))?;
+    let target = req.targets.get(i).ok_or_else(|| bad(CMD_DECK, "invalid target"))?;
+    if kind == "set_text" {
+        s.execute("text.set", &json!({"id": target.shape.0, "text": m.get("text")}))?;
+    } else {
+        set_bounds(s, m, target.shape.0)?;
+    }
+    Ok(())
+}
+
+/// Moves and resizes shape `id` to the `rect` of operation `m`.
+fn set_bounds(s: &mut Session, m: &Map<String, Value>, id: u32) -> Result<()> {
+    let r = m.get("rect").and_then(Value::as_array).ok_or_else(|| bad(CMD_DECK, "invalid rect"))?;
+    s.execute("shape.setBounds", &json!({"ids": [id], "x": r.first(), "y": r.get(1), "w": r.get(2), "h": r.get(3)}))?;
+    Ok(())
 }
 /// Parses a presentation-wide apply request. Raw JSON and every cap are checked before anything is
 /// copied out of it.

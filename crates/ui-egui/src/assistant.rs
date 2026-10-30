@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-use deckcraft_assistant::{AuthState, Error, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_STRUCTURE_BYTES, Request, Response};
+use deckcraft_assistant::{AuthState, Error, GeometryTarget, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_STRUCTURE_BYTES, Request, Response};
 use egui::{Color32, CornerRadius, Event, ImeEvent, Key, Margin, RichText, Stroke, TextEdit, Ui};
 use serde_json::{Value, json};
 
@@ -46,6 +46,9 @@ struct Pending {
     scope: &'static str,
     /// The whole context snapshot the request was built from, sent back to `assistant.apply`.
     context: Value,
+    /// The geometry snapshot of the current slide, sent back with shape operations; `None` unless the
+    /// request was for the current slide.
+    geometry: Option<Value>,
     /// The user's own words.
     instruction: String,
 }
@@ -57,6 +60,8 @@ struct Proposal {
     scope: &'static str,
     instruction: String,
     context: Value,
+    /// Geometry snapshot the proposal's shape operations index into; applied with them.
+    geometry: Option<Value>,
     /// Original text per target index; immutable, the preview shows it even after edits.
     originals: Vec<String>,
     response: Response,
@@ -193,9 +198,40 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
     let (originals, structure) = targets_of(&context)?;
     let slide_size =
         app.session.active().map(|d| format!("Scope: {scope}. Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
-    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size };
+    // Shapes are extras: a slide whose geometry can't be read still gets its text edits.
+    let geometry = if scope == "slide" { app.session.execute("assistant.geometryContext", &json!({})).ok() } else { None };
+    let shapes = geometry.as_ref().map(geometry_of).transpose()?.unwrap_or_default();
+    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size, geometry: shapes };
     request.validate().map_err(|e| e.to_string())?;
-    launch(app, Job { doc, slide, scope, context, instruction, model, request })
+    launch(app, Job { doc, slide, scope, context, geometry, instruction, model, request })
+}
+
+/// The geometry entries of an `assistant.geometryContext` snapshot, numbered as the snapshot numbers
+/// them. These indices are a separate space from the text targets.
+fn geometry_of(snapshot: &Value) -> Result<Vec<GeometryTarget>, String> {
+    let shapes = snapshot.get("shapes").and_then(Value::as_array).ok_or("the geometry context has no shapes")?;
+    shapes
+        .iter()
+        .enumerate()
+        .map(|(position, shape)| -> Result<GeometryTarget, String> {
+            let index = shape.get("index").and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok()).ok_or("invalid geometry shape")?;
+            if index != position {
+                return Err("invalid geometry shape".into());
+            }
+            let rect = shape.get("rect").and_then(Value::as_array).filter(|r| r.len() == 4).ok_or("invalid geometry shape")?;
+            let mut bounds = [0.0_f64; 4];
+            for (slot, value) in bounds.iter_mut().zip(rect) {
+                *slot = value.as_f64().ok_or("invalid geometry shape")?;
+            }
+            Ok(GeometryTarget {
+                index,
+                label: shape.get("label").and_then(Value::as_str).unwrap_or("shape").to_owned(),
+                preset: shape.get("preset").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                rect: bounds,
+                fill: shape.get("fill").and_then(Value::as_str).map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 /// Everything a worker needs, checked, plus what its answer is matched against.
@@ -204,6 +240,7 @@ struct Job {
     slide: usize,
     scope: &'static str,
     context: Value,
+    geometry: Option<Value>,
     instruction: String,
     model: Option<String>,
     request: Request,
@@ -216,7 +253,7 @@ fn launch(_app: &mut SlideApp, _job: Job) -> Result<Value, String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn launch(app: &mut SlideApp, job: Job) -> Result<Value, String> {
-    let Job { doc, slide, scope, context, instruction, model, request } = job;
+    let Job { doc, slide, scope, context, geometry, instruction, model, request } = job;
     let (sender, receiver) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancel.clone();
@@ -233,7 +270,7 @@ fn launch(app: &mut SlideApp, job: Job) -> Result<Value, String> {
             }
         })
         .map_err(|_| "could not start the assistant worker".to_owned())?;
-    app.assistant.pending = Some(Pending { cancel, receiver, doc, slide, scope, context, instruction });
+    app.assistant.pending = Some(Pending { cancel, receiver, doc, slide, scope, context, geometry, instruction });
     app.assistant.message = "Waiting for Claude Code…".into();
     Ok(json!({"started": true, "poll": "ui.assistant.status"}))
 }
@@ -272,6 +309,10 @@ pub fn poll(app: &mut SlideApp) {
     match answer {
         Ok((auth, response)) => {
             state.connection = Some(auth);
+            if let Some(problem) = unusable_shape(&response) {
+                state.message = format!("{problem} Try again.");
+                return;
+            }
             state.message.clear();
             record(state, pending, response);
         }
@@ -282,6 +323,21 @@ pub fn poll(app: &mut SlideApp) {
             state.message = explain(error);
         }
     }
+}
+
+/// Why an `add_shape` of the response can't be applied: a preset outside the gallery, or a flat box
+/// for a shape that isn't a line. The protocol only checks the name's form and allows flat boxes
+/// for lines; `assistant.applyDeck` would refuse these, so the proposal is never offered.
+fn unusable_shape(response: &Response) -> Option<String> {
+    let deck = response.deck.as_ref()?;
+    deck.operations.iter().filter(|op| op.kind == "add_shape").find_map(|op| {
+        let preset = op.preset.as_deref().unwrap_or_default();
+        if deckcraft_geom::preset::info(preset).is_none() {
+            return Some(format!("Claude proposed a `{preset}` shape, which isn't in the shape gallery."));
+        }
+        let flat = op.rect.is_some_and(|r| r[2] <= 0.0 || r[3] <= 0.0);
+        (flat && !deckcraft_geom::preset::is_line_like(preset)).then(|| format!("Claude proposed a `{preset}` shape with no width or height."))
+    })
 }
 
 /// A proposal from a validated response. Suggestions that change nothing are dropped.
@@ -297,6 +353,7 @@ fn record(state: &mut State, pending: Pending, mut response: Response) {
         scope: pending.scope,
         instruction: pending.instruction,
         context: pending.context,
+        geometry: pending.geometry,
         originals,
         response,
     });
@@ -316,7 +373,16 @@ pub fn preview_proposal(app: &mut SlideApp, instruction: &str, context: Value, r
         Some("slide") => "slide",
         _ => "selection",
     };
-    let pending = Pending { cancel: Arc::new(AtomicBool::new(false)), receiver, doc, slide, scope, context, instruction: instruction.to_owned() };
+    let pending = Pending {
+        cancel: Arc::new(AtomicBool::new(false)),
+        receiver,
+        doc,
+        slide,
+        scope,
+        context,
+        geometry: None,
+        instruction: instruction.to_owned(),
+    };
     let id = app.assistant.next_id;
     record(&mut app.assistant, pending, response);
     Ok(id)
@@ -337,6 +403,7 @@ fn proposal_bytes(history: &VecDeque<Proposal>) -> usize {
             p.context
                 .to_string()
                 .len()
+                .saturating_add(p.geometry.as_ref().map_or(0, |g| g.to_string().len()))
                 .saturating_add(p.instruction.len())
                 .saturating_add(p.originals.iter().map(String::len).sum::<usize>())
                 .saturating_add(p.response.explanation.len())
@@ -451,12 +518,17 @@ pub fn apply(app: &mut SlideApp, id: u64) {
         return;
     }
     let context = proposal.context.clone();
+    let geometry = proposal.geometry.clone();
     if proposal.scope == "presentation" && proposal.response.deck.is_some() {
         app.assistant.message = "Whole-presentation requests support text changes only; ask again for text suggestions.".into();
         return;
     }
     let (command, params) = if let Some(deck) = &proposal.response.deck {
-        ("assistant.applyDeck", json!({"context": context, "deck": deck, "changes": changes}))
+        let mut params = json!({"context": context, "deck": deck, "changes": changes});
+        if let Some(geometry) = geometry {
+            params["geometry"] = geometry;
+        }
+        ("assistant.applyDeck", params)
     } else if proposal.scope == "presentation" {
         ("assistant.applyPresentation", json!({"context": context, "changes": changes}))
     } else {
@@ -741,7 +813,7 @@ fn composer(ui: &mut Ui, state: &mut State, busy: bool, current: Option<&Armed>,
             let what = match state.scope {
                 "selection" => "the selected text shapes",
                 "presentation" => "eligible text shapes across the entire presentation",
-                _ => "the text shapes on this slide",
+                _ => "the text and unlocked shapes on this slide",
             };
             let model = if state.model.trim().is_empty() { String::new() } else { format!(" with model {}", state.model.trim()) };
             notice(
@@ -842,9 +914,10 @@ fn proposal_card(ui: &mut Ui, proposal: &Proposal, t: &Tokens, action: &mut Opti
         }
         if let Some(deck) = &proposal.response.deck {
             let labels = target_labels(&proposal.context);
+            let shapes = shape_labels(proposal.geometry.as_ref());
             for op in &deck.operations {
                 ui.separator();
-                ui.label(RichText::new(deck_op_line(op, &labels)).small().color(t.text_dim));
+                ui.label(RichText::new(deck_op_line(op, &labels, &shapes)).small().color(t.text_dim));
                 if let Some(text) = op.text.as_deref().filter(|t| !t.is_empty()) {
                     ui.label(RichText::new(text).color(accent_text(t)));
                 }
@@ -871,9 +944,21 @@ fn target_labels(context: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One line describing a deck operation for the review card.
-fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String]) -> String {
+/// The label of each geometry entry, for naming shape operations. Its indices are not the text
+/// targets' indices.
+fn shape_labels(geometry: Option<&Value>) -> Vec<String> {
+    geometry
+        .and_then(|g| g.get("shapes"))
+        .and_then(Value::as_array)
+        .map(|shapes| shapes.iter().map(|s| s.get("label").and_then(Value::as_str).unwrap_or("shape").to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// One line describing a deck operation for the review card. `labels` names text targets by
+/// `target`; `shapes` names geometry entries by `shape`.
+fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String], shapes: &[String]) -> String {
     let label = op.target.and_then(|i| labels.get(i)).map_or_else(|| "a shape".to_owned(), |l| format!("\u{201C}{l}\u{201D}"));
+    let shape = op.shape.and_then(|i| shapes.get(i)).map_or_else(|| "a shape".to_owned(), |l| format!("\u{201C}{l}\u{201D}"));
     let rect = op.rect.map_or_else(String::new, |[x, y, w, h]| format!(" at {x}, {y} · {w} × {h} pt"));
     let style = op.style.as_ref().map_or_else(String::new, style_line);
     match op.kind.as_str() {
@@ -885,6 +970,12 @@ fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String]) -> S
         "add_text" => format!("Text box{rect}{style}"),
         "set_text" => format!("Replace the text of {label}"),
         "set_bounds" => format!("Move and resize {label}{rect}"),
+        "set_shape_bounds" => format!("Move and resize {shape}{rect}"),
+        "set_shape_fill" => format!("Fill {shape} with {}", op.color.as_deref().unwrap_or_default()),
+        "add_shape" => {
+            let color = op.color.as_deref().map_or_else(String::new, |c| format!(" in {c}"));
+            format!("New {} shape{rect}{color}", op.preset.as_deref().unwrap_or_default())
+        }
         "background" => format!("Solid background colour {}", op.color.as_deref().unwrap_or_default()),
         other => other.to_owned(),
     }
@@ -1025,6 +1116,7 @@ pub(crate) fn start_fake_for_test(app: &mut SlideApp) -> (Arc<AtomicBool>, std::
         slide,
         scope: "selection",
         context: json!({"targets": []}),
+        geometry: None,
         instruction: "Shorten".into(),
     });
     (cancel, sender)
@@ -1135,5 +1227,99 @@ mod slide_consent_tests {
         assert_eq!(app.assistant.history.len(), 1);
         assert!(status(&app)["proposals"].as_array().unwrap().is_empty());
         assert!(app.assistant.message.contains("cancelled"));
+    }
+
+    /// A blank slide with one plain rectangle, and the rectangle's id.
+    fn app_with_rect() -> (SlideApp, u32) {
+        let mut session = deckcraft_engine::Session::with_new();
+        let id = session.execute("shape.insert", &json!({"preset": "rect", "rect": [10, 20, 100, 50]})).unwrap()["id"].as_u64().unwrap();
+        (SlideApp::new(session, crate::Services::default()), u32::try_from(id).unwrap())
+    }
+
+    /// A proposal with one fill of geometry entry 0, made from the slide's current snapshots.
+    fn fill_proposal(app: &mut SlideApp) -> u64 {
+        let context = app.session.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+        let geometry = app.session.execute("assistant.geometryContext", &json!({})).unwrap();
+        let response: Response = serde_json::from_value(json!({
+            "suggestions": [],
+            "explanation": "Fill it.",
+            "deck": {"operations": [{"kind": "set_shape_fill", "shape": 0, "color": "#102A43"}]}
+        }))
+        .unwrap();
+        let id = preview_proposal(app, "Fill it", context, response).unwrap();
+        app.assistant.history.front_mut().unwrap().geometry = Some(geometry);
+        id
+    }
+
+    #[test]
+    fn add_shape_presets_must_be_gallery_shapes_and_only_lines_may_be_flat() {
+        let answer = |preset: &str, height: f64| -> Response {
+            serde_json::from_value(json!({
+                "suggestions": [],
+                "explanation": "Add it.",
+                "deck": {"operations": [{"kind": "add_shape", "preset": preset, "rect": [10.0, 20.0, 100.0, height]}]}
+            }))
+            .unwrap()
+        };
+        assert_eq!(unusable_shape(&answer("star5", 50.0)), None);
+        assert_eq!(unusable_shape(&answer("line", 0.0)), None);
+        assert_eq!(unusable_shape(&answer("arc", 50.0)), None);
+        assert!(unusable_shape(&answer("hexagon2", 50.0)).is_some());
+        assert!(unusable_shape(&answer("rect", 0.0)).is_some());
+    }
+
+    fn filled(app: &SlideApp, shape: u32) -> bool {
+        app.session.active().unwrap().shape(deckcraft_model::ShapeId(shape)).unwrap().fill.is_some()
+    }
+
+    #[test]
+    fn shape_proposal_fills_the_shape_it_was_made_for_and_undo_restores_it() {
+        let (mut app, rect) = app_with_rect();
+        let id = fill_proposal(&mut app);
+        apply(&mut app, id);
+        assert_eq!(app.assistant.message, "");
+        assert!(filled(&app, rect));
+        assert!(app.assistant.history.is_empty(), "an applied proposal leaves the history");
+        app.session.execute("edit.undo", &json!({})).unwrap();
+        assert!(!filled(&app, rect));
+    }
+
+    #[test]
+    fn a_shape_moved_after_the_proposal_is_refused_and_kept() {
+        let (mut app, rect) = app_with_rect();
+        let id = fill_proposal(&mut app);
+        app.session.execute("shape.setBounds", &json!({"ids": [rect], "x": 90, "y": 90, "w": 40, "h": 40})).unwrap();
+        apply(&mut app, id);
+        assert!(app.assistant.message.starts_with("Could not apply the proposal"), "{}", app.assistant.message);
+        assert!(!filled(&app, rect));
+        assert_eq!(app.assistant.history.len(), 1, "a refused proposal stays for review");
+    }
+
+    #[test]
+    fn geometry_entries_keep_the_snapshot_order_as_their_indices() {
+        let snapshot = json!({"shapes": [
+            {"index": 0, "shape": 7, "label": "Rectangle 2", "preset": "rect", "rect": [1, 2, 3, 4], "fill": null},
+            {"index": 1, "shape": 9, "label": "Oval 3", "preset": "ellipse", "rect": [0, 0, 5, 5], "fill": "#102A43"}
+        ]});
+        let shapes = geometry_of(&snapshot).unwrap();
+        assert_eq!(shapes[1].index, 1);
+        assert_eq!(shapes[1].label, "Oval 3");
+        assert_eq!(shapes[1].fill.as_deref(), Some("#102A43"));
+        assert_eq!(shapes[0].rect, [1.0, 2.0, 3.0, 4.0]);
+        assert!(geometry_of(&json!({"shapes": [{"rect": [1, 2, 3]}]})).is_err());
+    }
+
+    #[test]
+    fn shape_operations_are_named_by_geometry_not_by_text_targets() {
+        use deckcraft_assistant::DeckOperation;
+        let labels = vec!["Title text".to_owned()];
+        let shapes = vec!["Rectangle 2".to_owned(), "Oval 3".to_owned()];
+        let fill: DeckOperation = serde_json::from_value(json!({"kind": "set_shape_fill", "shape": 1, "color": "#102A43"})).unwrap();
+        assert_eq!(deck_op_line(&fill, &labels, &shapes), "Fill \u{201C}Oval 3\u{201D} with #102A43");
+        let add: DeckOperation =
+            serde_json::from_value(json!({"kind": "add_shape", "preset": "roundRect", "rect": [1, 2, 3, 4], "color": "#FF8800"})).unwrap();
+        assert_eq!(deck_op_line(&add, &labels, &shapes), "New roundRect shape at 1, 2 · 3 × 4 pt in #FF8800");
+        let text: DeckOperation = serde_json::from_value(json!({"kind": "set_text", "target": 0, "text": "x"})).unwrap();
+        assert_eq!(deck_op_line(&text, &labels, &shapes), "Replace the text of \u{201C}Title text\u{201D}");
     }
 }

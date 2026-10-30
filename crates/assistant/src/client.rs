@@ -109,7 +109,8 @@ impl Client {
             cancel,
             mode == AuthState::OAuthToken,
         )?;
-        let parsed = crate::protocol::parse_response(&out.stdout, request.targets.len());
+        let parsed = crate::protocol::parse_response(&out.stdout, request.targets.len())
+            .and_then(|response| crate::protocol::check_shape_refs(&response, request.geometry.len()).map(|()| response));
         match parsed {
             Ok(response) if out.success => Ok((mode, response)),
             Ok(_) => Err(Error::Failed),

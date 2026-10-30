@@ -7,11 +7,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::process::{AUTH_ARGS, GENERATION_ARGS, Limits, credential_override_keys, key_present, run};
-use crate::protocol::{Source, parse_auth_status, parse_response, prompt_payload, select_auth};
-use crate::{AuthState, Client, Error, MAX_OUTPUT_BYTES, MAX_TARGETS, MAX_TEXT_BYTES, Provider, Request};
+use crate::protocol::{Source, check_shape_refs, parse_auth_status, parse_response, prompt_payload, select_auth};
+use crate::{AuthState, Client, Error, GeometryTarget, MAX_OUTPUT_BYTES, MAX_TARGETS, MAX_TEXT_BYTES, Provider, Request};
 
 fn request(targets: &[&str]) -> Request {
-    Request { instruction: "Make it formal".into(), targets: targets.iter().map(|t| (*t).to_owned()).collect(), structure: Vec::new(), context: None }
+    Request {
+        instruction: "Make it formal".into(),
+        targets: targets.iter().map(|t| (*t).to_owned()).collect(),
+        structure: Vec::new(),
+        context: None,
+        geometry: Vec::new(),
+    }
 }
 
 fn success(structured: &str) -> Vec<u8> {
@@ -319,6 +325,69 @@ fn deck_proposal_parses_valid_operations() {
 }
 
 #[test]
+fn shape_operations_parse_and_address_only_sent_geometry() {
+    let shapes = deck_envelope(
+        r##"{"kind":"set_shape_bounds","shape":0,"rect":[10,20,300,80]},
+           {"kind":"set_shape_fill","shape":1,"color":"#102A43"},
+           {"kind":"add_shape","preset":"roundRect","rect":[0,0,120,60],"color":null}"##,
+    );
+    let parsed = parse_response(shapes.as_bytes(), 0).unwrap();
+    assert_eq!(parsed.deck.as_ref().map(|d| d.operations.len()), Some(3));
+    assert!(check_shape_refs(&parsed, 2).is_ok());
+    assert_eq!(check_shape_refs(&parsed, 1), Err(Error::InvalidResponse));
+    assert_eq!(check_shape_refs(&parsed, 0), Err(Error::InvalidResponse));
+}
+
+#[test]
+fn shape_operations_reject_fields_that_belong_to_other_kinds() {
+    for fixture in [
+        r##"{"kind":"set_shape_fill","color":"#102A43"}"##,
+        r##"{"kind":"set_shape_fill","shape":0,"color":"red"}"##,
+        r##"{"kind":"set_shape_bounds","shape":0,"rect":[0,0,0,0]}"##,
+        r##"{"kind":"set_shape_bounds","shape":0,"rect":[0,0,10,10],"target":0}"##,
+        r##"{"kind":"add_text","rect":[0,0,10,10],"text":"x","shape":0}"##,
+        r##"{"kind":"set_text","target":0,"text":"x","preset":"rect"}"##,
+        r##"{"kind":"add_shape","preset":"","rect":[0,0,10,10]}"##,
+        r##"{"kind":"add_shape","preset":"rect/../x","rect":[0,0,10,10]}"##,
+        r##"{"kind":"add_shape","rect":[0,0,10,10]}"##,
+        r##"{"kind":"add_shape","preset":"rect","rect":[0,0,10,10],"shape":0}"##,
+        r##"{"kind":"add_shape","preset":"rect","rect":[0,0,10,10],"color":"blue"}"##,
+        r##"{"kind":"new_slide","layout":"blank"},{"kind":"set_shape_fill","shape":0,"color":"#102A43"}"##,
+    ] {
+        assert_eq!(parse_response(deck_envelope(fixture).as_bytes(), 1).map(|_| ()), Err(Error::InvalidResponse), "{fixture}");
+    }
+}
+
+#[test]
+fn geometry_is_sent_only_when_present_and_bounded() {
+    let mut req = request(&["Intro"]);
+    assert!(!prompt_payload(&req).unwrap_or_default().contains("geometry"));
+    req.geometry = vec![GeometryTarget { index: 0, label: "Rectangle 2".into(), preset: "rect".into(), rect: [10.0, 20.0, 100.0, 50.0], fill: None }];
+    assert_eq!(req.validate(), Ok(()));
+    let payload = prompt_payload(&req).unwrap_or_default();
+    assert!(
+        payload.contains(r#""geometry":[{"index":0,"label":"Rectangle 2","preset":"rect","rect":[10.0,20.0,100.0,50.0],"fill":null}]"#),
+        "{payload}"
+    );
+    req.geometry[0].index = 1;
+    assert_eq!(req.validate(), Err(Error::InvalidRequest));
+    req.geometry[0].index = 0;
+    req.geometry[0].rect = [f64::NAN, 0.0, 1.0, 1.0];
+    assert_eq!(req.validate(), Err(Error::InvalidRequest));
+    req.geometry[0].rect = [-5.0, 0.0, 1.0, 1.0];
+    assert_eq!(req.validate(), Ok(()), "a shape may hang off the slide edge");
+    req.geometry[0].rect = [0.0, 0.0, -1.0, 1.0];
+    assert_eq!(req.validate(), Err(Error::InvalidRequest));
+    req.geometry[0].rect = [0.0, 0.0, 1.0, 1.0];
+    req.geometry[0].fill = Some("red".into());
+    assert_eq!(req.validate(), Err(Error::InvalidRequest));
+    req.geometry[0].fill = None;
+    let template = req.geometry[0].clone();
+    req.geometry = (0..=MAX_TARGETS).map(|index| GeometryTarget { index, ..template.clone() }).collect();
+    assert_eq!(req.validate(), Err(Error::TooLong));
+}
+
+#[test]
 fn deck_proposal_rejects_hostile_or_inconsistent_operations() {
     let hostile = [
         // An empty deck is malformed: without slide work the model answers `deck: null`.
@@ -618,6 +687,7 @@ fn live_generation_with_signed_in_account() {
         targets: vec!["Ths sentense has two erors.".into(), "This one is fine.".into()],
         structure: Vec::new(),
         context: None,
+        geometry: Vec::new(),
     };
     let response = client.generate(&request, &cancel).unwrap();
     eprintln!("live: auth {auth:?}, {} suggestion(s): {:?}", response.suggestions.len(), response.suggestions);

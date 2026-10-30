@@ -9,8 +9,7 @@
 /// DeckCraft as the Mirai fork's releases know it: updates are only ever downloaded from the
 /// fork's own repository, never from upstream.
 #[cfg(not(target_arch = "wasm32"))]
-pub const UPDATE_APP: craft_update::App =
-    craft_update::App::new("deckcraft", "DeckCraft", "Presentations and slide shows", "mirasins/deckcraft");
+pub const UPDATE_APP: craft_update::App = craft_update::App::new("deckcraft", "DeckCraft", "Presentations and slide shows", "mirasins/deckcraft");
 
 pub mod assistant;
 pub mod backstage;

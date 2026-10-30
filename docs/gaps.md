@@ -364,7 +364,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 ## AI features
 
-> **Last updated:** 2026-10-29 · **Change:** minor (Mirai proposals can create slides, text boxes and a background and move or resize captured text shapes, previewed and applied in one undo step; broader AI features remain open).
+> **Last updated:** 2026-10-30 · **Change:** minor (Mirai geometry and fills: shape context and typed set-bounds, set-fill and add-shape operations, validated and undoable in one step; sent to the model and the pane for slide-scope requests; broader AI features remain open).
 
 - Mirai offers plain-text rewrites for selected text shapes or eligible text on the current slide
   through the official Claude Code CLI. Each request requires explicit consent; changing the
@@ -380,6 +380,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Engine: Mirai shape geometry and fills (`assistant.geometryContext`, `set_shape_bounds`, `set_shape_fill`, `add_shape` in `assistant.applyDeck`), validated and undoable in one step; offered to the model and the pane for slide-scope requests, lines, arcs and connector presets included. Compiled, linted and tested. |
 | 2026-10-29 | minor | Mirai add_text operations can carry a text-box style (bold, italic, size 1 to 400 pt, #RRGGBB colour), validated, previewed and applied in the same one-undo step. |
 | 2026-10-29 | minor | Mirai proposals add slide work (new slides, text boxes, solid background, text and position/size of captured text shapes) with preview and one undoable apply; limits 100 operations and 64 KiB. |
 | 2026-10-28 | minor | Mirai proposals can be edited and reviewed on-slide; selection changes withdraw consent, slide changes cancel pending work, and undo restores applied text. |
