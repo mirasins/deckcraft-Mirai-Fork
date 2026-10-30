@@ -27,6 +27,8 @@ pub const MAX_SLIDES: usize = 256;
 pub const MAX_DECK_OPERATIONS: usize = 100;
 /// Largest accepted deck coordinate or size, in points (mirrors the assistant protocol cap).
 pub const MAX_DECK_COORDINATE: f64 = 10_000.0;
+/// Largest accepted font size in a deck text style, in points (mirrors the assistant protocol cap).
+pub const MAX_DECK_FONT_PT: f64 = 400.0;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -620,7 +622,7 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
     let mut total = 0usize;
     let mut after_new = false;
     for op in ops {
-        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color"], CMD)?;
+        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color", "style"], CMD)?;
         let kind = text_field(m, "kind", CMD, 32)?;
         let present = |key: &str| m.get(key).is_some_and(|v| !v.is_null());
         let allowed = match kind {
@@ -628,13 +630,13 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 after_new = true;
                 &["layout", "text"][..]
             }
-            "add_text" => &["rect", "text"][..],
+            "add_text" => &["rect", "text", "style"][..],
             "set_text" => &["target", "text"][..],
             "set_bounds" => &["target", "rect"][..],
             "background" => &["color"][..],
             _ => return Err(bad(CMD, "unknown operation")),
         };
-        if ["target", "layout", "text", "rect", "color"].iter().any(|key| present(key) && !allowed.contains(key)) {
+        if ["target", "layout", "text", "rect", "color", "style"].iter().any(|key| present(key) && !allowed.contains(key)) {
             return Err(bad(CMD, "unexpected operation field"));
         }
         if kind == "new_slide" {
@@ -675,12 +677,36 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 return Err(bad(CMD, "color must be #RRGGBB"));
             }
         }
+        if kind == "add_text" && present("style") {
+            let style = object(m.get("style").ok_or_else(|| bad(CMD, "missing style"))?, "style", &["bold", "italic", "size", "color"], CMD)?;
+            let mut styled = false;
+            for key in ["bold", "italic"] {
+                if let Some(v) = style.get(key) {
+                    v.as_bool().ok_or_else(|| bad(CMD, format!("`{key}` must be true or false")))?;
+                    styled = true;
+                }
+            }
+            if let Some(v) = style.get("size") {
+                v.as_f64().filter(|v| v.is_finite() && (1.0..=MAX_DECK_FONT_PT).contains(v)).ok_or_else(|| bad(CMD, "size must be 1 to 400 pt"))?;
+                styled = true;
+            }
+            if let Some(v) = style.get("color") {
+                let color = v.as_str().ok_or_else(|| bad(CMD, "`color` must be a string"))?;
+                if color.len() != 7 || !color.starts_with('#') || !color.as_bytes().get(1..).is_some_and(|x| x.iter().all(u8::is_ascii_hexdigit)) {
+                    return Err(bad(CMD, "color must be #RRGGBB"));
+                }
+                styled = true;
+            }
+            if !styled {
+                return Err(bad(CMD, "a style sets at least one of bold, italic, size and color"));
+            }
+        }
     }
     for (shape, text) in &planned {
         s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
     }
     for op in ops {
-        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color"], CMD)?;
+        let m = object(op, "operation", &["kind", "target", "layout", "text", "rect", "color", "style"], CMD)?;
         let kind = text_field(m, "kind", CMD, 32)?;
         match kind {
             "new_slide" => {
@@ -702,7 +728,25 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 }
             }
             "add_text" => {
-                s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
+                let out = s.execute("insert.textBox", &json!({"rect": m.get("rect"), "text": m.get("text")}))?;
+                let style = m.get("style").filter(|v| !v.is_null());
+                if let Some(style) = style {
+                    let id = out.get("id").cloned().ok_or_else(|| bad(CMD, "the new text box has no id"))?;
+                    s.execute("edit.select", &json!({"ids": [id]}))?;
+                    if let Some(v) = style.get("bold") {
+                        s.execute("format.bold", &json!({"on": v}))?;
+                    }
+                    if let Some(v) = style.get("italic") {
+                        s.execute("format.italic", &json!({"on": v}))?;
+                    }
+                    if let Some(v) = style.get("size") {
+                        s.execute("format.size", &json!({"size": v}))?;
+                    }
+                    if let Some(v) = style.get("color") {
+                        s.execute("format.color", &json!({"color": v}))?;
+                    }
+                    s.execute("edit.select", &json!({"ids": []}))?;
+                }
             }
             "background" => {
                 s.execute("design.background", &json!({"color": m.get("color")}))?;

@@ -37,7 +37,7 @@ operation before you apply it, and a mixed answer applies as one step:
 | Operation | What it does |
 |---|---|
 | New slide | Adds a slide with layout Blank, Title or Title and Content, optionally with a title |
-| Add text box | Adds a text box at a rectangle, with plain text |
+| Add text box | Adds a text box at a rectangle, with plain text and an optional style (bold, italic, size in points, `#RRGGBB` colour) |
 | Set text | Replaces the text of a captured text shape on the original slide |
 | Set position and size | Moves and resizes a captured text shape on the original slide |
 | Background | Sets a solid `#RRGGBB` background |
@@ -46,6 +46,8 @@ Rules:
 
 - A proposal holds **1 to 100 operations** (an empty operation list is rejected) and its text is
   limited to **64 KiB** in total. Larger requests are rejected with a message to split them.
+- A style is accepted only on an added text box, sets at least one of bold, italic, size and colour,
+  the size is 1 to 400 pt and the colour is `#RRGGBB`. Existing shapes keep their formatting.
 - Coordinates and sizes are points from the slide's top-left corner, between 0 and 10000, with
   positive width and height.
 - Set text and set position may address only text shapes captured in the original slide's context,
@@ -86,6 +88,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | An add_text operation can carry a style (bold, italic, size 1 to 400 pt, #RRGGBB colour) applied to the whole text box; styles are validated at the protocol and in the engine, listed on the card, and undo stays one step. Existing shapes keep their formatting; no live-account request. |
 | 2026-10-29 | minor | Fixed proposals that were rejected as stale after a selection change or slide navigation: the snapshot revision is now a content revision (selection and navigation don't bump it). Mixed answers (text suggestions and slide operations) are accepted and apply atomically in one undo step; a suggestion and a set-text on the same shape are refused. Presentation-wide snapshots record their slide and apply only from it. Offline tests only. |
 | 2026-10-29 | minor | Added presentation-wide text context and atomic text replacements across slides; text-only, excludes unsupported objects and is bounded to 256 slides/shapes and 64 KiB. Offline tests only. |
 | 2026-10-29 | minor | Added the original Mirai logo and two-step Enter confirmation, bound to the document revision; no live-account or real-IME check. |

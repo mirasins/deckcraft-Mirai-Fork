@@ -177,7 +177,8 @@ fn a_deck_proposal_card_lists_readable_operations() {
         "suggestions": [], "explanation": "A new slide carries the findings.",
         "deck": {"operations": [
             {"kind":"new_slide", "target":null, "layout":"titleAndContent", "text":"Findings", "rect":null, "color":null},
-            {"kind":"add_text", "target":null, "layout":null, "text":"The aurora peaks near midnight.", "rect":[40, 150, 620, 80], "color":null},
+            {"kind":"add_text", "target":null, "layout":null, "text":"The aurora peaks near midnight.", "rect":[40, 150, 620, 80], "color":null,
+             "style":{"bold":true, "italic":null, "size":24, "color":"#102A43"}},
             {"kind":"background", "target":null, "layout":null, "text":null, "rect":null, "color":"#102A43"}
         ]}
     }))
@@ -191,9 +192,12 @@ fn a_deck_proposal_card_lists_readable_operations() {
         app,
     );
     h.run_steps(3);
-    for line in
-        ["New Title and Content slide", "Text box at 40, 150 · 620 × 80 pt", "Solid background colour #102A43", "The aurora peaks near midnight."]
-    {
+    for line in [
+        "New Title and Content slide",
+        "Text box at 40, 150 · 620 × 80 pt · bold, 24 pt, #102A43",
+        "Solid background colour #102A43",
+        "The aurora peaks near midnight.",
+    ] {
         h.get_by_label(line);
     }
 }

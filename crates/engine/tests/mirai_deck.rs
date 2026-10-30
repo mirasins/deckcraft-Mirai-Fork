@@ -176,3 +176,53 @@ fn a_failed_text_change_in_a_mixed_apply_leaves_the_slides_alone() {
     let shape = s.active().unwrap().doc.slides[1].shapes.iter().find(|sh| sh.id.0 == id as u32).unwrap().text.as_ref().unwrap().text();
     assert_eq!(shape, "Old");
 }
+
+#[test]
+fn styled_text_box_applies_format_and_undoes_as_one_step() {
+    let mut s = Session::with_new();
+    let before = s.active().unwrap().doc.slides.len();
+    let context = s.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let deck = json!({"operations": [
+        {"kind":"new_slide", "layout":"blank"},
+        {"kind":"add_text", "text":"Headline", "rect":[40, 40, 600, 80],
+         "style":{"bold":true, "italic":false, "size":24, "color":"#102A43"}}
+    ]});
+    s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck})).unwrap();
+    let d = s.active().unwrap();
+    let slide = d.doc.slides.get(d.selection.slide).unwrap();
+    let shape = slide.shapes.iter().find(|sh| sh.text.as_ref().is_some_and(|t| t.text() == "Headline")).unwrap();
+    let run = &shape.text.as_ref().unwrap().paragraphs[0].runs[0];
+    assert_eq!(run.props.bold, Some(true));
+    assert_eq!(run.props.size, Some(24.0));
+    assert!(matches!(run.props.fill, Some(deckcraft_model::Fill::Solid { ref color })
+        if matches!(color.base, deckcraft_model::ColorBase::Rgb { rgb } if rgb.r == 0x10 && rgb.g == 0x2A && rgb.b == 0x43)));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.slides.len(), before);
+}
+
+#[test]
+fn invalid_style_is_rejected_without_changes() {
+    let mut s = Session::with_new();
+    let context = s.execute("assistant.context", &json!({"scope": "slide"})).unwrap();
+    let before = s.active().unwrap().doc.slides.len();
+    let shapes_before = s.active().unwrap().doc.slides[s.active().unwrap().selection.slide].shapes.len();
+    for style in [
+        json!({}),
+        json!({"bold": null, "italic": null, "size": null, "color": null}),
+        json!({"size": 0}),
+        json!({"size": 401}),
+        json!({"color": "red"}),
+        json!({"bold": "yes"}),
+        json!({"bold": true, "extra": 1}),
+        json!({"bold": true, "italic": null, "size": null, "color": null, "rect": [0, 0, 1, 1]}),
+    ] {
+        let deck = json!({"operations": [{"kind":"add_text", "text":"x", "rect":[0, 0, 100, 50], "style": style}]});
+        assert!(s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck})).is_err(), "style {style} was accepted");
+    }
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.slides.len(), before);
+    assert_eq!(d.doc.slides[d.selection.slide].shapes.len(), shapes_before);
+    // A style on an operation that cannot take one is refused.
+    let deck = json!({"operations": [{"kind":"background", "color":"#123456", "style":{"bold":true}}]});
+    assert!(s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck})).is_err());
+}

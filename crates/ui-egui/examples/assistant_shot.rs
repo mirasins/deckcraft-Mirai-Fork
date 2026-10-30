@@ -5,7 +5,7 @@
 //! cargo run -p deckcraft-ui-egui --example assistant_shot -- /tmp/opencode/assistant.png
 //! ```
 
-use deckcraft_assistant::{DeckOperation, DeckProposal, Response, Suggestion};
+use deckcraft_assistant::{DeckOperation, DeckProposal, Response, Suggestion, TextStyle};
 use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Services, SlideApp, assistant};
 use egui::vec2;
@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     text: Some("Findings".into()),
                     rect: None,
                     color: None,
+                    style: None,
                 },
                 DeckOperation {
                     kind: "add_text".into(),
@@ -48,8 +49,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     text: Some("The aurora peaks near midnight.".into()),
                     rect: Some([40.0, 150.0, 620.0, 80.0]),
                     color: None,
+                    style: Some(TextStyle { bold: Some(true), italic: None, size: Some(20.0), color: Some("#102A43".into()) }),
                 },
-                DeckOperation { kind: "background".into(), target: None, layout: None, text: None, rect: None, color: Some("#102A43".into()) },
+                DeckOperation {
+                    kind: "background".into(),
+                    target: None,
+                    layout: None,
+                    text: None,
+                    rect: None,
+                    color: Some("#102A43".into()),
+                    style: None,
+                },
             ],
         }),
     };

@@ -296,6 +296,12 @@ fn deck_proposal_parses_valid_operations() {
     let absent = envelope(r#"{"suggestions":[{"index":0,"text":"Short"}],"explanation":"e","deck":null}"#);
     assert_eq!(parse_response(absent.as_bytes(), 1).map(|r| r.deck.is_none()), Ok(true));
 
+    let styled = deck_envelope(
+        r##"{"kind":"add_text","rect":[10,20,300,80],"text":"Headline","style":{"bold":true,"italic":null,"size":24,"color":"#102A43"}}"##,
+    );
+    let parsed = parse_response(styled.as_bytes(), 0).map(|r| r.deck.and_then(|d| d.operations[0].style.clone()));
+    assert_eq!(parsed, Ok(Some(crate::TextStyle { bold: Some(true), italic: None, size: Some(24.0), color: Some("#102A43".into()) })));
+
     // Text suggestions and slide work in one answer are both kept, for an atomic apply.
     let mixed =
         envelope(r#"{"suggestions":[{"index":0,"text":"Short"}],"explanation":"e","deck":{"operations":[{"kind":"new_slide","layout":"blank"}]}}"#);
@@ -342,6 +348,16 @@ fn deck_proposal_rejects_hostile_or_inconsistent_operations() {
         deck_envelope(r#"{"kind":"new_slide","layout":"blank","text":"bad\u0007"}"#),
         deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"a\u2028b"}"#),
         deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"a\ufffcb"}"#),
+        // A style belongs only to add_text, holds at least one field, a bounded size and #RRGGBB.
+        deck_envelope(r#"{"kind":"set_text","target":0,"text":"x","style":{"bold":true}}"#),
+        deck_envelope(r#"{"kind":"new_slide","layout":"blank","style":{"bold":true}}"#),
+        deck_envelope(r##"{"kind":"background","color":"#123456","style":{"bold":true}}"##),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{}}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{"bold":null,"italic":null,"size":null,"color":null}}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{"bold":"yes"}}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{"size":0}}"#),
+        deck_envelope(r#"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{"size":401}}"#),
+        deck_envelope(r##"{"kind":"add_text","rect":[0,0,1,1],"text":"x","style":{"color":"red"}}"##),
         // Too many operations, and total text beyond the limit.
         deck_envelope(&vec![r##"{"kind":"background","color":"#000000"}"##; 101].join(",")),
         deck_envelope(&format!(

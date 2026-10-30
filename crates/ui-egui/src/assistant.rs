@@ -875,18 +875,37 @@ fn target_labels(context: &Value) -> Vec<String> {
 fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String]) -> String {
     let label = op.target.and_then(|i| labels.get(i)).map_or_else(|| "a shape".to_owned(), |l| format!("\u{201C}{l}\u{201D}"));
     let rect = op.rect.map_or_else(String::new, |[x, y, w, h]| format!(" at {x}, {y} · {w} × {h} pt"));
+    let style = op.style.as_ref().map_or_else(String::new, style_line);
     match op.kind.as_str() {
         "new_slide" => match op.layout.as_deref() {
             Some("title") => "New Title slide".to_owned(),
             Some("titleAndContent") => "New Title and Content slide".to_owned(),
             _ => "New Blank slide".to_owned(),
         },
-        "add_text" => format!("Text box{rect}"),
+        "add_text" => format!("Text box{rect}{style}"),
         "set_text" => format!("Replace the text of {label}"),
         "set_bounds" => format!("Move and resize {label}{rect}"),
         "background" => format!("Solid background colour {}", op.color.as_deref().unwrap_or_default()),
         other => other.to_owned(),
     }
+}
+
+/// The style fields an add_text operation carries, joined for the review card.
+fn style_line(style: &deckcraft_assistant::TextStyle) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if style.bold == Some(true) {
+        parts.push("bold".into());
+    }
+    if style.italic == Some(true) {
+        parts.push("italic".into());
+    }
+    if let Some(size) = style.size {
+        parts.push(format!("{size} pt"));
+    }
+    if let Some(color) = &style.color {
+        parts.push(color.clone());
+    }
+    if parts.is_empty() { String::new() } else { format!(" · {}", parts.join(", ")) }
 }
 
 fn accent_text(t: &Tokens) -> Color32 {
