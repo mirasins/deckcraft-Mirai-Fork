@@ -21,6 +21,8 @@ pub const MAX_TARGETS: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 /// Longest label a target carries.
 pub const MAX_LABEL_BYTES: usize = 64;
+/// Most slides a presentation-wide snapshot walks, for DoS protection.
+pub const MAX_SLIDES: usize = 256;
 /// Most operations one `assistant.applyDeck` takes (mirrors the assistant protocol cap).
 pub const MAX_DECK_OPERATIONS: usize = 100;
 /// Largest accepted deck coordinate or size, in points (mirrors the assistant protocol cap).
@@ -54,6 +56,24 @@ pub fn specs() -> Vec<CommandSpec> {
             "{context: snapshot, deck: {operations: [...]}}; bounded slide, text, geometry and background changes, one undo step",
             has_slide,
             apply_deck
+        ),
+        cmd!(
+            query "assistant.presentationContext",
+            "Writing Assistant Presentation Context",
+            [],
+            None,
+            "{} → {document_id, revision, scope: \"presentation\", skipped, targets: [{index, slide_index, slide_id, shape, label, original}]}",
+            has_slide,
+            presentation_context
+        ),
+        cmd!(
+            "assistant.applyPresentation",
+            "Apply Writing Assistant Presentation Changes",
+            [],
+            None,
+            "{context: snapshot from assistant.presentationContext, changes: [{index, text, markdown?: false}]} → {applied, document_id, revision}; one undo step, all or nothing",
+            has_slide,
+            apply_presentation
         ),
     ]
 }
@@ -126,6 +146,50 @@ impl Snapshot {
     }
 }
 
+/// One text shape in a presentation-wide snapshot.
+struct PresentationPiece {
+    index: usize,
+    slide_index: usize,
+    slide_id: SlideId,
+    shape: ShapeId,
+    label: String,
+    original: String,
+}
+
+struct PresentationSnapshot {
+    document_id: u64,
+    revision: u64,
+    skipped: usize,
+    targets: Vec<PresentationPiece>,
+}
+
+impl PresentationSnapshot {
+    fn to_json(&self) -> Value {
+        json!({
+            "document_id": self.document_id,
+            "revision": self.revision,
+            "scope": "presentation",
+            "skipped": self.skipped,
+            "targets": self.targets.iter().map(|t| json!({
+                "index": t.index,
+                "slide_index": t.slide_index,
+                "slide_id": t.slide_id.0,
+                "shape": t.shape.0,
+                "label": t.label,
+                "original": t.original,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A presentation-wide request: the captured targets and the requested replacements.
+struct PresentationRequest {
+    document_id: u64,
+    revision: u64,
+    targets: Vec<PresentationPiece>,
+    changes: Vec<(usize, String)>,
+}
+
 /// Text that `text`/`text.set` reproduces exactly: newlines, carriage returns and tabs only.
 /// Other control characters (line breaks, field codes) and the object-replacement character are
 /// refused.
@@ -167,6 +231,27 @@ fn is_empty_placeholder(sh: &Shape) -> bool {
 /// long name is never copied whole.
 fn label_of(sh: &Shape) -> String {
     let mut out = String::new();
+    for c in sh.name.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Label for a presentation-wide target: the shape name, prefixed with its slide number, capped.
+fn presentation_label_of(sh: &Shape, slide_index: usize) -> String {
+    let prefix = format!("Slide {} ", slide_index + 1);
+    let mut out = String::new();
+    for c in prefix.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
+            break;
+        }
+        out.push(c);
+    }
     for c in sh.name.chars() {
         let c = if c.is_control() { ' ' } else { c };
         if out.len().saturating_add(c.len_utf8()) > MAX_LABEL_BYTES {
@@ -264,6 +349,62 @@ fn read(s: &Session, scope: Scope, cmd: &str) -> Result<Snapshot> {
 fn context(s: &mut Session, v: &Value) -> Result<Value> {
     let scope = Scope::parse(v.get("scope"), CMD_CONTEXT)?;
     Ok(read(s, scope, CMD_CONTEXT)?.to_json())
+}
+
+/// Reads every plain text shape on every slide, in slide then shape order.
+fn read_presentation(s: &Session, cmd: &str) -> Result<PresentationSnapshot> {
+    let st = s.doc()?;
+    if st.selection.target != Target::Slides {
+        return Err(bad(cmd, "the assistant edits slide text only: not masters, layouts, notes or handout pages"));
+    }
+    if st.selection.cells.is_some() {
+        return Err(bad(cmd, "table cells aren't supported yet"));
+    }
+    if let Some(t) = &st.selection.text
+        && (t.notes || t.cell.is_some())
+    {
+        return Err(bad(cmd, "speaker notes and table cells aren't supported yet"));
+    }
+    if st.doc.slides.len() > MAX_SLIDES {
+        return Err(bad(cmd, format!("more than {MAX_SLIDES} slides; the limit is {MAX_SLIDES}")));
+    }
+    let mut skipped = 0usize;
+    let mut targets: Vec<PresentationPiece> = Vec::new();
+    let mut bytes = 0usize;
+    for (slide_index, slide) in st.doc.slides.iter().enumerate() {
+        for sh in &slide.shapes {
+            if is_empty_placeholder(sh) {
+                skipped += 1;
+                continue;
+            }
+            let remaining = MAX_TEXT_BYTES.saturating_sub(bytes);
+            match plain_text(sh, remaining, cmd)? {
+                Some(text) => {
+                    if targets.len() >= MAX_TARGETS {
+                        return Err(bad(cmd, format!("more than {MAX_TARGETS} text shapes; select fewer")));
+                    }
+                    bytes = bytes.saturating_add(text.len());
+                    if bytes > MAX_TEXT_BYTES {
+                        return Err(bad(cmd, format!("more than {MAX_TEXT_BYTES} bytes of text; select fewer shapes")));
+                    }
+                    targets.push(PresentationPiece {
+                        index: targets.len(),
+                        slide_index,
+                        slide_id: slide.id,
+                        shape: sh.id,
+                        label: presentation_label_of(sh, slide_index),
+                        original: text,
+                    });
+                }
+                None => skipped += 1,
+            }
+        }
+    }
+    Ok(PresentationSnapshot { document_id: st.uid, revision: st.revision, skipped, targets })
+}
+
+fn presentation_context(s: &mut Session, _v: &Value) -> Result<Value> {
+    Ok(read_presentation(s, "assistant.presentationContext")?.to_json())
 }
 
 /// A bounded, shape-checked apply request. Nothing here reads the document yet.
@@ -569,6 +710,156 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
     }
     Ok(json!({"applied": ops.len()}))
 }
+/// Parses a presentation-wide apply request. Raw JSON and every cap are checked before anything is
+/// copied out of it.
+fn parse_presentation(v: &Value) -> Result<PresentationRequest> {
+    let cmd = "assistant.applyPresentation";
+    let top = object(v, "parameters", &["context", "changes"], cmd)?;
+    let ctx = top.get("context").ok_or_else(|| bad(cmd, "missing `context`"))?;
+    let c = object(ctx, "context", &["document_id", "revision", "scope", "skipped", "targets"], cmd)?;
+    let document_id = uint(c, "document_id", cmd)?;
+    let revision = uint(c, "revision", cmd)?;
+    let scope = text_field(c, "scope", cmd, 16)?;
+    if scope != "presentation" {
+        return Err(bad(cmd, format!("`scope` must be \"presentation\", got {:?}", short(scope))));
+    }
+    if c.contains_key("skipped") {
+        uint(c, "skipped", cmd)?;
+    }
+    let raw = c.get("targets").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`targets` must be an array"))?;
+    if raw.len() > MAX_TARGETS {
+        return Err(bad(cmd, format!("{} targets; the limit is {MAX_TARGETS}", raw.len())));
+    }
+    let mut targets = Vec::with_capacity(raw.len());
+    let mut bytes = 0usize;
+    for (i, t) in raw.iter().enumerate() {
+        let m = object(t, "target", &["index", "slide_index", "slide_id", "shape", "label", "original"], cmd)?;
+        let index = usize::try_from(uint(m, "index", cmd)?).map_err(|_| bad(cmd, format!("target {i}: `index` is out of range")))?;
+        if index != i {
+            return Err(bad(cmd, format!("target {i}: `index` must be {i}")));
+        }
+        let slide_index =
+            usize::try_from(uint(m, "slide_index", cmd)?).map_err(|_| bad(cmd, format!("target {i}: `slide_index` is out of range")))?;
+        let slide_id = u32::try_from(uint(m, "slide_id", cmd)?).map_err(|_| bad(cmd, format!("target {i}: `slide_id` is out of range")))?;
+        let shape = u32::try_from(uint(m, "shape", cmd)?).map_err(|_| bad(cmd, format!("target {i}: `shape` is out of range")))?;
+        let label = text_field(m, "label", cmd, MAX_LABEL_BYTES)?.to_string();
+        let original = text_field(m, "original", cmd, MAX_TEXT_BYTES)?;
+        bytes = bytes.saturating_add(original.len());
+        if bytes > MAX_TEXT_BYTES {
+            return Err(bad(cmd, format!("more than {MAX_TEXT_BYTES} bytes of original text")));
+        }
+        targets.push(PresentationPiece {
+            index,
+            slide_index,
+            slide_id: SlideId(slide_id),
+            shape: ShapeId(shape),
+            label,
+            original: original.to_string(),
+        });
+    }
+    let raw_changes = top.get("changes").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`changes` must be an array"))?;
+    if raw_changes.len() > MAX_TARGETS {
+        return Err(bad(cmd, format!("{} changes; the limit is {MAX_TARGETS}", raw_changes.len())));
+    }
+    let mut changes = Vec::with_capacity(raw_changes.len());
+    let mut text_bytes = 0usize;
+    for (n, ch) in raw_changes.iter().enumerate() {
+        let m = object(ch, "change", &["index", "text", "markdown"], cmd)?;
+        let index = usize::try_from(uint(m, "index", cmd)?).map_err(|_| bad(cmd, format!("change {n}: `index` is out of range")))?;
+        match m.get("markdown") {
+            None | Some(Value::Bool(false)) => {}
+            Some(_) => return Err(bad(cmd, format!("change {n}: markdown isn't supported yet; send plain text"))),
+        }
+        let text = text_field(m, "text", cmd, MAX_TEXT_BYTES)?;
+        text_bytes = text_bytes.saturating_add(text.len());
+        if text_bytes > MAX_TEXT_BYTES {
+            return Err(bad(cmd, format!("more than {MAX_TEXT_BYTES} bytes of replacement text")));
+        }
+        changes.push((index, text.to_string()));
+    }
+    Ok(PresentationRequest { document_id, revision, targets, changes })
+}
+
+fn check_presentation_targets(s: &Session, req: &PresentationRequest) -> Result<()> {
+    let cmd = "assistant.applyPresentation";
+    let st = s.doc()?;
+    if st.selection.target != Target::Slides
+        || st.selection.cells.is_some()
+        || st.selection.text.as_ref().is_some_and(|t| t.notes || t.cell.is_some())
+    {
+        return Err(bad(cmd, "the assistant edits slides only, not masters, notes or table cells"));
+    }
+    let mut seen = HashSet::new();
+    for t in &req.targets {
+        if !seen.insert((t.slide_id, t.shape)) {
+            return Err(bad(cmd, format!("target {}: shape {} on slide {} appears twice", t.index, t.shape, t.slide_id)));
+        }
+        if t.slide_index >= st.doc.slides.len() {
+            return Err(bad(cmd, format!("target {}: slide {} is gone", t.index, t.slide_index)));
+        }
+        let slide = st
+            .doc
+            .slides
+            .get(t.slide_index)
+            .filter(|sl| sl.id == t.slide_id)
+            .ok_or_else(|| bad(cmd, format!("target {}: the context's slide is gone or moved; read it again", t.index)))?;
+        let sh = slide
+            .shapes
+            .iter()
+            .find(|sh| sh.id == t.shape)
+            .ok_or_else(|| bad(cmd, format!("target {}: shape {} isn't a top-level shape on the captured slide", t.index, t.shape)))?;
+        match plain_text(sh, t.original.len(), cmd) {
+            Ok(Some(now)) if now == t.original => {}
+            Ok(None) => return Err(bad(cmd, format!("target {}: shape {} is no longer plain text", t.index, t.shape))),
+            _ => return Err(bad(cmd, format!("target {}: its text changed since the context was read; read it again", t.index))),
+        }
+    }
+    Ok(())
+}
+
+fn plan_presentation(req: &PresentationRequest) -> Result<Vec<(usize, ShapeId, String)>> {
+    let cmd = "assistant.applyPresentation";
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (index, text) in &req.changes {
+        let t = req.targets.get(*index).ok_or_else(|| bad(cmd, format!("change for target {index}: there is no such target")))?;
+        if !seen.insert(*index) {
+            return Err(bad(cmd, format!("target {index} is changed twice")));
+        }
+        if !plain_ok(text) {
+            return Err(bad(cmd, format!("target {index}: the text has a control character (only newline, carriage return and tab are allowed)")));
+        }
+        if text != &t.original {
+            out.push((t.slide_index, t.shape, text.clone()));
+        }
+    }
+    Ok(out)
+}
+
+fn apply_presentation(s: &mut Session, v: &Value) -> Result<Value> {
+    let cmd = "assistant.applyPresentation";
+    let req = parse_presentation(v)?;
+    let (uid, revision, original_slide) = {
+        let st = s.doc()?;
+        (st.uid, st.revision, st.selection.slide)
+    };
+    if req.document_id != uid || req.revision != revision {
+        return Err(bad(cmd, "stale context: the document changed since the context was read; read it again"));
+    }
+    check_presentation_targets(s, &req)?;
+    let planned = plan_presentation(&req)?;
+    if planned.is_empty() {
+        return Ok(json!({"applied": 0, "document_id": uid, "revision": revision}));
+    }
+    for (slide_index, shape, text) in &planned {
+        s.execute("slide.go", &json!({"index": slide_index}))?;
+        s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
+    }
+    let _ = s.execute("slide.go", &json!({"index": original_slide}));
+    let st = s.doc()?;
+    Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.revision}))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

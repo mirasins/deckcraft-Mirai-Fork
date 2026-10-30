@@ -138,6 +138,36 @@ fn slide_proposal_is_applied_in_app_and_undoable() {
 }
 
 #[test]
+fn presentation_proposal_applies_changes_across_slides() {
+    let mut session = Session::with_new();
+    session.execute("insert.textBox", &json!({"rect":[10,10,200,40],"text":"First"})).unwrap();
+    session.execute("slide.new", &json!({"layout":"blank"})).unwrap();
+    session.execute("insert.textBox", &json!({"rect":[10,10,200,40],"text":"Second"})).unwrap();
+    let mut app = SlideApp::new(session, Services::default());
+    let context = app.session.execute("assistant.presentationContext", &json!({})).unwrap();
+    let targets = context["targets"].as_array().unwrap();
+    let first = targets.iter().position(|t| t["original"] == "First").unwrap();
+    let second = targets.iter().position(|t| t["original"] == "Second").unwrap();
+    let answer = Response {
+        suggestions: vec![
+            Suggestion { index: first, text: "One".into(), markdown: false },
+            Suggestion { index: second, text: "Two".into(), markdown: false },
+        ],
+        explanation: String::new(),
+        deck: None,
+    };
+    let id = assistant::preview_proposal(&mut app, "Rewrite both", context, answer).unwrap();
+    assistant::apply(&mut app, id);
+    let status = app.run("ui.assistant.status", json!({})).unwrap();
+    assert_eq!(status["message"], "", "{status}");
+    let updated = app.session.execute("assistant.presentationContext", &json!({})).unwrap();
+    assert_eq!(updated["targets"][first]["original"], "One");
+    assert_eq!(updated["targets"][second]["original"], "Two");
+    app.session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(app.session.execute("assistant.presentationContext", &json!({})).unwrap()["targets"][first]["original"], "First");
+}
+
+#[test]
 fn a_deck_proposal_card_lists_readable_operations() {
     use egui_kittest::kittest::Queryable;
     let mut app = app();

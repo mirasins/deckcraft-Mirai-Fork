@@ -1,17 +1,17 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (original Mirai logo and two-step Enter confirmation; bounded slide proposals) · **Validation:** offline tests; no live-account request.
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (bounded presentation-wide text context and atomic changes) · **Validation:** offline tests; no live-account request.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
-text shapes or in the current slide's eligible text shapes. It can also propose a short list of
+text shapes, in the current slide, or across the presentation. It can also propose a short list of
 slide operations (below). It does not generate full decks, pictures, charts, advanced formatting
-or media, does not edit slides other than the one it was created from, and does not run commands
-produced by the model.
+or media. Presentation-wide scope edits captured text on any slide; layout operations remain limited
+to the original slide and newly created slides. It does not run commands produced by the model.
 
 ## Use
 
-1. The current-slide scope is selected by default; choose selection to send only selected text shapes.
-   At most 256 shapes and 64 KiB of source text are accepted.
+1. The current-slide scope is selected by default; choose selection or entire presentation instead.
+   Entire presentation sends eligible text from up to 256 slides, at most 256 shapes and 64 KiB.
 2. Open **Review › Mirai Assistant**, write an instruction, confirm that specific request and Send.
    Confirmation is per request, not a persistent blanket permission.
 3. Compare each original/proposed text and the explanation. The latest proposal also appears in an
@@ -23,7 +23,8 @@ produced by the model.
    in-flight request; text already sent cannot be retracted. Proposals stay bound to the slide where
    they were created.
 
-The engine commands `assistant.context`, `assistant.apply` and `assistant.applyDeck` own the snapshot
+The engine commands `assistant.context`, `assistant.apply`, `assistant.presentationContext`,
+`assistant.applyPresentation` and `assistant.applyDeck` own the snapshot
 and validation.
 
 ## Slide operations
@@ -82,6 +83,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | Added presentation-wide text context and atomic text replacements across slides; text-only, excludes unsupported objects and is bounded to 256 slides/shapes and 64 KiB. Offline tests only. |
 | 2026-10-29 | minor | Added the original Mirai logo and two-step Enter confirmation, bound to the document revision; no live-account or real-IME check. |
 | 2026-10-29 | minor | Slide operations in proposals (new Blank, Title or Title and Content slides, text boxes, solid background, text and position/size of captured text shapes), listed on the card in readable lines, applied in one undo step with undo and redo; limits of 1 to 100 operations and 64 KiB; an empty operation list, stale proposals and mixed text/slide answers are rejected. Review pass: engine, protocol and UI tests cover several slides with distributed content, an empty starting slide, edits to an existing slide, rejection without partial changes, and atomic undo/redo; the card’s operation lines are asserted by a UI test and a headless screenshot was generated. No live-account request. |
 | 2026-10-28 | minor | Editable contextual proposal card on the slide, undoable apply and slide-switch consent reset. |

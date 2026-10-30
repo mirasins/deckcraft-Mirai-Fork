@@ -26,7 +26,7 @@ const INSTALL_HINT: &str = "Install the official Claude Code CLI, then sign in w
 const SIGN_IN_COMMAND: &str = "claude auth login";
 
 /// Scope values, as `ui.assistant.request` takes them, with their labels.
-const SCOPES: [(&str, &str); 2] = [("selection", "Selected text shapes"), ("slide", "Current slide")];
+const SCOPES: [(&str, &str); 3] = [("selection", "Selected text shapes"), ("slide", "Current slide"), ("presentation", "Entire presentation")];
 /// Quick drafts: they fill the composer and never send anything.
 const CHIPS: [(&str, &str); 4] = [
     ("Shorten", "Shorten this text and keep the key points."),
@@ -179,13 +179,20 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
     let scope = match p.get("scope").map(|v| v.as_str().ok_or("`scope` must be a string")).transpose()? {
         Some("selection") => "selection",
         None | Some("slide") => "slide",
-        Some(_) => return Err("`scope` must be selection or slide".into()),
+        Some("presentation") => "presentation",
+        Some(_) => return Err("`scope` must be selection, slide or presentation".into()),
     };
     let model_text = p.get("model").map(|v| v.as_str().ok_or("`model` must be a string")).transpose()?;
     let model = deckcraft_assistant::model_name(model_text).map_err(|e| e.to_string())?;
-    let context = app.session.execute("assistant.context", &json!({"scope": scope})).map_err(|e| e.to_string())?;
+    let context = if scope == "presentation" {
+        app.session.execute("assistant.presentationContext", &json!({}))
+    } else {
+        app.session.execute("assistant.context", &json!({"scope": scope}))
+    }
+    .map_err(|e| e.to_string())?;
     let (originals, structure) = targets_of(&context)?;
-    let slide_size = app.session.active().map(|d| format!("Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
+    let slide_size =
+        app.session.active().map(|d| format!("Scope: {scope}. Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
     let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size };
     request.validate().map_err(|e| e.to_string())?;
     launch(app, Job { doc, slide, scope, context, instruction, model, request })
@@ -304,8 +311,12 @@ pub fn preview_proposal(app: &mut SlideApp, instruction: &str, context: Value, r
     app.assistant.doc = Some(doc);
     app.assistant.slide = Some(slide);
     let (_, receiver) = std::sync::mpsc::channel();
-    let pending =
-        Pending { cancel: Arc::new(AtomicBool::new(false)), receiver, doc, slide, scope: "selection", context, instruction: instruction.to_owned() };
+    let scope = match context.get("scope").and_then(Value::as_str) {
+        Some("presentation") => "presentation",
+        Some("slide") => "slide",
+        _ => "selection",
+    };
+    let pending = Pending { cancel: Arc::new(AtomicBool::new(false)), receiver, doc, slide, scope, context, instruction: instruction.to_owned() };
     let id = app.assistant.next_id;
     record(&mut app.assistant, pending, response);
     Ok(id)
@@ -444,8 +455,14 @@ pub fn apply(app: &mut SlideApp, id: u64) {
         app.assistant.message = "The proposal mixes text and slide operations. Ask again.".into();
         return;
     }
+    if proposal.scope == "presentation" && proposal.response.deck.is_some() {
+        app.assistant.message = "Whole-presentation requests support text changes only; ask again for text suggestions.".into();
+        return;
+    }
     let (command, params) = if let Some(deck) = &proposal.response.deck {
         ("assistant.applyDeck", json!({"context": context, "deck": deck}))
+    } else if proposal.scope == "presentation" {
+        ("assistant.applyPresentation", json!({"context": context, "changes": changes}))
     } else {
         ("assistant.apply", json!({"context": context, "changes": changes}))
     };
@@ -674,6 +691,8 @@ fn scope_chooser(ui: &mut Ui, state: &mut State, shapes: usize, t: &Tokens) {
             0 => "Nothing selected. Select text shapes, or choose Current slide.".to_owned(),
             n => format!("{n} selected. Text shapes only; tables, groups and notes are left unchanged."),
         }
+    } else if state.scope == "presentation" {
+        "Text shapes across the entire presentation are sent. Tables, groups and notes are excluded; up to 256 text shapes.".to_owned()
     } else {
         "Every text shape on this slide. Tables, groups and notes are left unchanged.".to_owned()
     };
@@ -723,7 +742,11 @@ fn composer(ui: &mut Ui, state: &mut State, busy: bool, current: Option<&Armed>,
         clamp_bytes(&mut state.model, MAX_MODEL_BYTES);
         let confirmed = state.armed.as_ref().is_some_and(|armed| Some(armed) == current);
         if confirmed {
-            let what = if state.scope == "selection" { "the selected text shapes" } else { "the text shapes on this slide" };
+            let what = match state.scope {
+                "selection" => "the selected text shapes",
+                "presentation" => "eligible text shapes across the entire presentation",
+                _ => "the text shapes on this slide",
+            };
             let model = if state.model.trim().is_empty() { String::new() } else { format!(" with model {}", state.model.trim()) };
             notice(
                 ui,
@@ -805,6 +828,16 @@ fn proposal_card(ui: &mut Ui, proposal: &Proposal, t: &Tokens, action: &mut Opti
         for suggestion in &proposal.response.suggestions {
             let original = proposal.originals.get(suggestion.index).map_or("", String::as_str);
             ui.separator();
+            if let Some(label) = proposal
+                .context
+                .get("targets")
+                .and_then(Value::as_array)
+                .and_then(|t| t.get(suggestion.index))
+                .and_then(|t| t.get("label"))
+                .and_then(Value::as_str)
+            {
+                ui.label(RichText::new(label).small().color(t.text_dim));
+            }
             ui.label(RichText::new("Original").small().color(t.text_dim));
             ui.label(original);
             ui.label(RichText::new("Proposal").small().color(t.text_dim));
