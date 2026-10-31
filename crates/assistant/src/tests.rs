@@ -798,3 +798,28 @@ fn stream_result_line_is_parsed_and_validated() {
     );
     assert_eq!(parse_stream_response(outside.as_bytes(), 0), Err(Error::InvalidResponse));
 }
+
+#[test]
+fn slide_numbers_only_on_placing_and_painting_operations_before_new_slide() {
+    for fixture in [
+        r##"{"kind":"background","color":"#102A43","slide":2}"##,
+        r##"{"kind":"add_text","rect":[0,0,10,10],"text":"x","slide":1}"##,
+        r##"{"kind":"add_shape","preset":"rect","rect":[0,0,10,10],"slide":3}"##,
+    ] {
+        assert!(parse_response(deck_envelope(fixture).as_bytes(), 1).is_ok(), "{fixture}");
+    }
+    for fixture in [
+        r##"{"kind":"background","color":"#102A43","slide":0}"##,
+        r##"{"kind":"set_text","target":0,"text":"x","slide":1}"##,
+        r##"{"kind":"new_slide","layout":"blank","slide":1}"##,
+        r##"{"kind":"new_slide","layout":"blank"},{"kind":"background","color":"#102A43","slide":1}"##,
+    ] {
+        assert_eq!(parse_response(deck_envelope(fixture).as_bytes(), 1).map(|_| ()), Err(Error::InvalidResponse), "{fixture}");
+    }
+}
+
+#[test]
+fn the_prompt_lets_presentation_scope_edit_the_whole_deck() {
+    assert!(!crate::protocol::SYSTEM_PROMPT.contains("use only suggestions, with deck set to null"));
+    assert!(crate::protocol::OUTPUT_SCHEMA.contains(r#""slide":{"type":["integer","null"],"minimum":1}"#));
+}

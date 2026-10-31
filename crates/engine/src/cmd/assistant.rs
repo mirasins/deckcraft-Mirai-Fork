@@ -34,7 +34,7 @@ pub const MAX_DECK_FONT_PT: f64 = 400.0;
 /// The command name every deck-proposal check and error reports.
 const CMD_DECK: &str = "assistant.applyDeck";
 /// Every field an `assistant.applyDeck` operation may carry; each kind allows a subset.
-const OPERATION_FIELDS: [&str; 9] = ["kind", "target", "layout", "text", "rect", "color", "style", "shape", "preset"];
+const OPERATION_FIELDS: [&str; 10] = ["kind", "target", "layout", "text", "rect", "color", "style", "shape", "preset", "slide"];
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -737,6 +737,9 @@ fn check_operation(c: &mut DeckCheck, m: &Map<String, Value>, kind: &str) -> Res
     if ["target", "layout", "text", "rect", "color", "style", "shape", "preset"].iter().any(|key| is_set(m, key) && !allowed.contains(key)) {
         return Err(bad(CMD_DECK, "unexpected operation field"));
     }
+    if is_set(m, "slide") {
+        return Err(bad(CMD_DECK, "a slide number is only for whole-presentation proposals"));
+    }
     check_new_slide(m, kind)?;
     check_captured_target(c, m, kind)?;
     check_shape_target(c, m, kind)?;
@@ -1208,6 +1211,7 @@ fn apply_presentation_deck(s: &mut Session, v: &Value) -> Result<Value> {
         replaced: planned.iter().map(|(_, shape, _)| *shape).collect(),
         after_new: false,
         total_text: 0,
+        slide_count: s.doc()?.doc.slides.len(),
     };
     check_presentation_operations(&mut check, ops)?;
     // Apply text suggestions first, on their own slides.
@@ -1227,7 +1231,7 @@ fn apply_presentation_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 working = s.doc()?.selection.slide;
             }
             "add_text" => {
-                s.execute("slide.go", &json!({"index": working}))?;
+                s.execute("slide.go", &json!({"index": slide_of(m, working)}))?;
                 run_add_text(s, m)?;
             }
             "set_style" => {
@@ -1264,11 +1268,11 @@ fn apply_presentation_deck(s: &mut Session, v: &Value) -> Result<Value> {
                 s.execute("slide.go", &json!({"index": working}))?;
             }
             "add_shape" => {
-                s.execute("slide.go", &json!({"index": working}))?;
+                s.execute("slide.go", &json!({"index": slide_of(m, working)}))?;
                 run_add_shape(s, m)?;
             }
             "background" => {
-                s.execute("slide.go", &json!({"index": working}))?;
+                s.execute("slide.go", &json!({"index": slide_of(m, working)}))?;
                 s.execute("design.background", &json!({"color": m.get("color")}))?;
             }
             _ => return Err(bad(cmd, "unknown operation")),
@@ -1278,12 +1282,19 @@ fn apply_presentation_deck(s: &mut Session, v: &Value) -> Result<Value> {
     Ok(json!({"applied": ops.len(), "text_changes": planned.len()}))
 }
 
+/// The slide index an operation's checked `slide` number names, or `working` without one.
+fn slide_of(m: &Map<String, Value>, working: usize) -> usize {
+    m.get("slide").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).and_then(|n| n.checked_sub(1)).unwrap_or(working)
+}
+
 struct PresentationDeckCheck<'a> {
     req: &'a PresentationRequest,
     geo: Option<&'a geometry::Request>,
     replaced: HashSet<ShapeId>,
     after_new: bool,
     total_text: usize,
+    /// Slides in the presentation when the proposal was checked; `slide` numbers stay within it.
+    slide_count: usize,
 }
 
 fn check_presentation_operations(c: &mut PresentationDeckCheck, ops: &[Value]) -> Result<()> {
@@ -1296,6 +1307,19 @@ fn check_presentation_operations(c: &mut PresentationDeckCheck, ops: &[Value]) -
         let allowed = allowed_fields(kind).ok_or_else(|| bad("assistant.applyPresentationDeck", "unknown operation"))?;
         if ["target", "layout", "text", "rect", "color", "style", "shape", "preset"].iter().any(|key| is_set(m, key) && !allowed.contains(key)) {
             return Err(bad("assistant.applyPresentationDeck", "unexpected operation field"));
+        }
+        // An existing slide, by number (1 = first), for operations that place or paint.
+        if is_set(m, "slide") {
+            if !matches!(kind, "background" | "add_text" | "add_shape") {
+                return Err(bad("assistant.applyPresentationDeck", "only background, add_text and add_shape take a slide number"));
+            }
+            if c.after_new {
+                return Err(bad("assistant.applyPresentationDeck", "a slide number can't follow new_slide"));
+            }
+            let n = uint(m, "slide", "assistant.applyPresentationDeck")?;
+            if n == 0 || usize::try_from(n).map_or(true, |n| n > c.slide_count) {
+                return Err(bad("assistant.applyPresentationDeck", "slide number outside the presentation"));
+            }
         }
         // new_slide
         if kind == "new_slide" {

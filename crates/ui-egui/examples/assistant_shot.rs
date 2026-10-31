@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     style: None,
                     shape: None,
                     preset: None,
+                    slide: None,
                 },
                 DeckOperation {
                     kind: "add_text".into(),
@@ -54,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     style: Some(TextStyle { bold: Some(true), italic: None, size: Some(20.0), color: Some("#102A43".into()) }),
                     shape: None,
                     preset: None,
+                    slide: None,
                 },
                 DeckOperation {
                     kind: "background".into(),
@@ -65,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     style: None,
                     shape: None,
                     preset: None,
+                    slide: None,
                 },
             ],
         }),

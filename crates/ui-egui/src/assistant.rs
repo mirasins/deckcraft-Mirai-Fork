@@ -211,8 +211,15 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
     }
     .map_err(|e| e.to_string())?;
     let (originals, structure) = targets_of(&context)?;
-    let slide_size =
-        app.session.active().map(|d| format!("Scope: {scope}. Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
+    let slide_size = app.session.active().map(|d| {
+        format!(
+            "Scope: {scope}. Slide size in points: {} × {}. Slides: {}; current slide: {}.",
+            d.doc.slide_size.width,
+            d.doc.slide_size.height,
+            d.doc.slides.len(),
+            d.selection.slide.saturating_add(1)
+        )
+    });
     // Shapes are extras: a slide whose geometry can't be read still gets its text edits.
     let geometry = match scope {
         "slide" => app.session.execute("assistant.geometryContext", &json!({})).ok(),
@@ -1029,7 +1036,8 @@ fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String], shap
     let shape = op.shape.and_then(|i| shapes.get(i)).map_or_else(|| "a shape".to_owned(), |l| format!("\u{201C}{l}\u{201D}"));
     let rect = op.rect.map_or_else(String::new, |[x, y, w, h]| format!(" at {x}, {y} · {w} × {h} pt"));
     let style = op.style.as_ref().map_or_else(String::new, style_line);
-    match op.kind.as_str() {
+    let on = op.slide.map_or_else(String::new, |n| format!(" on slide {n}"));
+    let line = match op.kind.as_str() {
         "new_slide" => match op.layout.as_deref() {
             Some("title") => "New Title slide".to_owned(),
             Some("titleAndContent") => "New Title and Content slide".to_owned(),
@@ -1047,7 +1055,8 @@ fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String], shap
         }
         "background" => format!("Solid background colour {}", op.color.as_deref().unwrap_or_default()),
         other => other.to_owned(),
-    }
+    };
+    format!("{line}{on}")
 }
 
 /// The style fields an add_text operation carries, joined for the review card.

@@ -1,14 +1,13 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (presentation-wide geometry; rendered slide images to Claude Code, opt-in) · **Validation:** offline tests; the image transport was verified once against the real CLI with a synthetic 8×8 PNG, no document content.
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (presentation scope edits the whole deck: slide numbers on background, text boxes and shapes) · **Validation:** offline tests; the image transport was verified once against the real CLI with a synthetic 8×8 PNG, no document content.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
 text shapes, in the current slide, or across the presentation. It can also propose a short list of
 slide operations (below). It does not generate full decks, pictures, charts, advanced formatting
-or media. Presentation-wide scope edits captured text on any slide and may carry slide operations
-(backgrounds, styled text boxes, text, style and bounds changes on captured shapes) that apply
-across the captured slides and to newly created slides; shape geometry operations stay limited to the
-slide they were captured on. It does not run commands produced by the model.
+or media. Presentation-wide scope edits the whole deck: text, style and bounds changes on captured
+shapes and shape geometry operations apply on the slide each shape lives on, and backgrounds, text
+boxes and new shapes can name any existing slide by number. It does not run commands produced by the model.
 
 ## Use
 
@@ -46,6 +45,7 @@ operation before you apply it, and a mixed answer applies as one step:
 | Set style | Applies bold, italic, size and colour to a captured text shape |
 | Set position and size | Moves and resizes a captured text shape on the original slide |
 | Background | Sets a solid `#RRGGBB` background |
+| Add shape | Adds a gallery shape at a rectangle, with an optional `#RRGGBB` colour |
 
 Rules:
 
@@ -58,7 +58,11 @@ Rules:
   positive width and height.
 - Set text and set position may address only text shapes captured in the original slide's context,
   and they must come before any new slide. Operations after a new slide apply to that new slide.
-- Only these five operations are accepted from a model answer. Model output is never executed, and it is never treated
+- In a presentation-wide proposal, background, add text box and add shape may carry `slide`, an
+  existing slide number (1 is the first), to work on that slide; without it they work on the current
+  slide, or on the newest slide after a new slide. A slide number must come before any new slide and
+  is refused outside presentation scope.
+- Only these operations are accepted from a model answer. Model output is never executed, and it is never treated
   as Markdown or as commands.
 - The whole list applies as **one undoable step**. Undo restores the slide and its shapes as they
   were before the apply.
@@ -147,6 +151,7 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Protocol, engine and pane: the system prompt no longer limits presentation scope to text suggestions; background, add_text and add_shape accept an optional `slide` number in presentation proposals (checked against the slide count, refused after new_slide and in slide scope), the model is told the slide count and current slide, and the card names the slide. Removed duplicate apply commands and unused operation aliases. Offline tests only. |
 | 2026-10-30 | minor | Engine, protocol and pane: `assistant.presentationGeometryContext` lists unlocked text-free autoshapes across every slide, each entry linked to its slide; presentation proposals may move, fill and create shapes on any captured slide, validated before any change and undoable in one step. The pane can also send rendered slide PNGs to Claude Code through the CLI's official stream-json input, opt-in per request with per-image size and count caps; verified once with a synthetic image, no live-account run of the full flow. |
 | 2026-10-30 | minor | Engine, protocol and pane: added typed `set_style` operations for captured text shapes and presentation-wide deck application; a presentation proposal may now carry backgrounds, styled text boxes, text, style and bounds changes across captured slides in one undoable step. Shape geometry stays slide-scoped. Offline tests only. |
 | 2026-10-30 | minor | Engine, protocol and pane: `assistant.geometryContext` lists unlocked text-free autoshapes (lines, arcs and connector presets included) with their own indices; `assistant.applyDeck` accepts `set_shape_bounds`, `set_shape_fill` and `add_shape`, validated before any change and undoable in one step; a line's colour is its stroke and its box may be flat. Offline tests only. |

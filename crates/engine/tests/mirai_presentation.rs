@@ -182,3 +182,63 @@ fn presentation_geometry_hostile_params_never_panic() {
         assert!(s.execute("assistant.applyPresentation", &params).is_err());
     }
 }
+
+fn op(kind: &str, slide: Option<u64>) -> Value {
+    json!({"kind":kind,"target":null,"layout":null,"text":null,"rect":null,"color":null,"style":null,"shape":null,"preset":null,"slide":slide})
+}
+
+#[test]
+fn presentation_deck_paints_and_adds_on_any_existing_slide() {
+    let mut s = two_slides();
+    // The current slide is the second; the proposal works on the first by number.
+    assert_eq!(s.active().unwrap().selection.slide, 1);
+    let before = s.active().unwrap().doc.slides.clone();
+    let context = s.execute("assistant.presentationContext", &json!({})).unwrap();
+    let mut background = op("background", Some(1));
+    background["color"] = json!("#102A43");
+    let mut text = op("add_text", Some(1));
+    text["rect"] = json!([20, 80, 300, 40]);
+    text["text"] = json!("Added");
+    let mut shape = op("add_shape", Some(1));
+    shape["preset"] = json!("rect");
+    shape["rect"] = json!([20, 140, 100, 50]);
+    let deck = json!({"operations":[background, text, shape]});
+    s.execute("assistant.applyPresentation", &json!({"context":context,"deck":deck})).unwrap();
+    let st = s.active().unwrap();
+    assert_eq!(st.selection.slide, 1, "the current slide stays put");
+    let (first, second) = (&st.doc.slides[0], &st.doc.slides[1]);
+    assert_eq!(first.shapes.len(), before[0].shapes.len() + 2);
+    assert_ne!(first.background, before[0].background);
+    assert_eq!(second, &before[1], "the current slide is untouched");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.slides, before, "one undo step");
+}
+
+#[test]
+fn presentation_deck_slide_numbers_are_checked() {
+    let mut s = two_slides();
+    let context = s.execute("assistant.presentationContext", &json!({})).unwrap();
+    let painted = |slide: Value| {
+        let mut b = op("background", None);
+        b["color"] = json!("#102A43");
+        b["slide"] = slide;
+        b
+    };
+    for slide in [json!(0), json!(3), json!(-1), json!("1"), json!(u64::MAX)] {
+        let deck = json!({"operations":[painted(slide.clone())]});
+        assert!(s.execute("assistant.applyPresentation", &json!({"context":context.clone(),"deck":deck})).is_err(), "slide {slide}");
+    }
+    // A slide number can't follow new_slide.
+    let mut new_slide = op("new_slide", None);
+    new_slide["layout"] = json!("blank");
+    let deck = json!({"operations":[new_slide, painted(json!(1))]});
+    assert!(s.execute("assistant.applyPresentation", &json!({"context":context.clone(),"deck":deck})).is_err());
+    // Only operations that place or paint take one.
+    let mut set_text = op("set_text", Some(1));
+    set_text["target"] = json!(0);
+    set_text["text"] = json!("x");
+    assert!(s.execute("assistant.applyPresentation", &json!({"context":context,"deck":{"operations":[set_text]}})).is_err());
+    // A single-slide proposal never takes a slide number.
+    let context = s.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    assert!(s.execute("assistant.applyDeck", &json!({"context":context,"deck":{"operations":[painted(json!(1))]}})).is_err());
+}
