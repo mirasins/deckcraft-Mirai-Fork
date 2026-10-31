@@ -1,12 +1,14 @@
 # Mirai Assistant
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (shape geometry, fills and lines in slide proposals) · **Validation:** offline tests; no live-account request.
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (presentation-wide geometry; rendered slide images to Claude Code, opt-in) · **Validation:** offline tests; the image transport was verified once against the real CLI with a synthetic 8×8 PNG, no document content.
 
 Mirai is a task pane in **Review › Mirai Assistant**. It proposes plain-text replacements in selected
 text shapes, in the current slide, or across the presentation. It can also propose a short list of
 slide operations (below). It does not generate full decks, pictures, charts, advanced formatting
-or media. Presentation-wide scope edits captured text on any slide; layout operations remain limited
-to the original slide and newly created slides. It does not run commands produced by the model.
+or media. Presentation-wide scope edits captured text on any slide and may carry slide operations
+(backgrounds, styled text boxes, text, style and bounds changes on captured shapes) that apply
+across the captured slides and to newly created slides; shape geometry operations stay limited to the
+slide they were captured on. It does not run commands produced by the model.
 
 ## Use
 
@@ -25,8 +27,10 @@ to the original slide and newly created slides. It does not run commands produce
    they were created.
 
 The engine commands `assistant.context`, `assistant.apply`, `assistant.presentationContext`,
-`assistant.applyPresentation`, `assistant.geometryContext` and `assistant.applyDeck` own the snapshot
-and validation.
+`assistant.applyPresentation`, `assistant.geometryContext`, `assistant.applyDeck` and
+`assistant.presentationGeometryContext` own the snapshot and validation. `assistant.applyPresentation`
+also accepts an optional `deck` (and `geometry`), so a presentation-wide proposal applies as one undo
+step, with shape operations editing each shape on the slide it was captured from.
 
 ## Slide operations
 
@@ -39,6 +43,7 @@ operation before you apply it, and a mixed answer applies as one step:
 | New slide | Adds a slide with layout Blank, Title or Title and Content, optionally with a title |
 | Add text box | Adds a text box at a rectangle, with plain text and an optional style (bold, italic, size in points, `#RRGGBB` colour) |
 | Set text | Replaces the text of a captured text shape on the original slide |
+| Set style | Applies bold, italic, size and colour to a captured text shape |
 | Set position and size | Moves and resizes a captured text shape on the original slide |
 | Background | Sets a solid `#RRGGBB` background |
 
@@ -46,8 +51,9 @@ Rules:
 
 - A proposal holds **1 to 100 operations** (an empty operation list is rejected) and its text is
   limited to **64 KiB** in total. Larger requests are rejected with a message to split them.
-- A style is accepted only on an added text box, sets at least one of bold, italic, size and colour,
-  the size is 1 to 400 pt and the colour is `#RRGGBB`. Existing shapes keep their formatting.
+- A style is accepted on an added text box or a `set_style` operation, sets at least one of bold,
+  italic, size and colour, the size is 1 to 400 pt and the colour is `#RRGGBB`. Existing shapes keep
+  their formatting unless a `set_style` operation names them.
 - Coordinates and sizes are points from the slide's top-left corner, between 0 and 10000, with
   positive width and height.
 - Set text and set position may address only text shapes captured in the original slide's context,
@@ -65,13 +71,13 @@ non-plain content are outside this version; explicit current-slide scope reports
 Plain text keeps the standard text-set paragraph/first-run formatting and fit behavior.
 Programmatic requests require `confirm: true`.
 
-### Shape geometry and fills (engine, first step)
+### Shape geometry and fills
 
-The engine can read and change unlocked, text-free autoshapes on the current slide. For a
-slide-scope request the pane sends this context to the model as `geometry`, so the model may
-propose `set_shape_bounds`, `set_shape_fill` and `add_shape` alongside text edits; for selection
-or presentation scope no geometry is sent. The same operations are always available through the
-engine (MCP, CLI and the control channel).
+The engine can read and change unlocked, text-free autoshapes. For a slide-scope request the pane
+sends the current slide's context to the model as `geometry`; for a presentation-scope request it
+sends `assistant.presentationGeometryContext`, whose entries each name the slide they live on. The
+model may propose `set_shape_bounds`, `set_shape_fill` and `add_shape` alongside text edits. The same
+operations are always available through the engine (MCP, CLI and the control channel).
 
 - `assistant.geometryContext` is read-only. It lists up to 256 shapes with `index`, `shape`, `label`,
   `preset`, `rect` (`[x, y, w, h]` in points) and `fill` (`#RRGGBB` for a plain solid fill, otherwise
@@ -90,11 +96,30 @@ engine (MCP, CLI and the control channel).
     left unselected.
   - A line's box runs from its start to its end and may be flat (zero width or height, not both);
     every other shape needs a positive width and height.
-- In the pane, a slide-scope request whose geometry can't be read still runs, without shape
-  operations; an answer whose `add_shape` names a preset outside the gallery, or a flat closed shape,
-  is not offered. The pane sends textual geometry (labels, presets, rectangles, plain fills) only:
-  no slide image or screenshot is sent, and Claude Code never receives one. Changing the slide
-  after a proposal cancels it, so a proposal is only applied with the user's explicit consent.
+- In the pane, a request whose geometry can't be read still runs, without shape operations; an
+  answer whose `add_shape` names a preset outside the gallery, or a flat closed shape, is not offered.
+  A presentation-wide geometry snapshot is bounded to 256 slides and 256 shapes; each entry carries
+  its `slide_index` and `slide_id`, a forged or moved entry is refused before any change, and a shape
+  operation applies on the slide its entry was captured from. Changing the slide after a proposal
+  cancels it, so a proposal is only applied with the user's explicit consent.
+
+### Rendered slide images (opt-in)
+
+The pane can also send Claude Code **rendered pictures of the slides**, through the CLI's official
+streaming input (the Agent SDK message form: one text block with the JSON context, then one base64
+PNG image block per slide). This is off by default and per request:
+
+- The checkbox **Send rendered slide images** is off until you tick it; the confirmation notice then
+  says the request carries pictures, and ticking or clearing the checkbox cancels an armed request.
+- A slide or selection request sends one picture: the current slide, rendered offscreen (no window
+  capture, no focus stealing). A presentation request sends the **first 4 slides**; the rest of the
+  presentation reaches the model as text and geometry only.
+- Each picture is a PNG of at most 2 MiB, rendered at up to 1280 pixels wide; an image that stays
+  over the cap after two re-render attempts fails the request. At most 4 images per request.
+- The transport was verified once against the real `claude` CLI (2.1.314) with a synthetic 8×8 PNG
+  and a test schema: the CLI accepted the stream-json image block and returned the structured
+  result. No DeckCraft document content was sent in that check, and the full in-app flow has not
+  been run against a live account.
 - As above, everything is validated before the first change; a snapshot that is stale, names a
   locked or changed shape, or repeats one is refused; the whole list is one undoable step; and a shape
   operation after a new slide is refused.
@@ -122,6 +147,8 @@ provider call. Nothing in this document is a claim about the real behaviour of C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Engine, protocol and pane: `assistant.presentationGeometryContext` lists unlocked text-free autoshapes across every slide, each entry linked to its slide; presentation proposals may move, fill and create shapes on any captured slide, validated before any change and undoable in one step. The pane can also send rendered slide PNGs to Claude Code through the CLI's official stream-json input, opt-in per request with per-image size and count caps; verified once with a synthetic image, no live-account run of the full flow. |
+| 2026-10-30 | minor | Engine, protocol and pane: added typed `set_style` operations for captured text shapes and presentation-wide deck application; a presentation proposal may now carry backgrounds, styled text boxes, text, style and bounds changes across captured slides in one undoable step. Shape geometry stays slide-scoped. Offline tests only. |
 | 2026-10-30 | minor | Engine, protocol and pane: `assistant.geometryContext` lists unlocked text-free autoshapes (lines, arcs and connector presets included) with their own indices; `assistant.applyDeck` accepts `set_shape_bounds`, `set_shape_fill` and `add_shape`, validated before any change and undoable in one step; a line's colour is its stroke and its box may be flat. Offline tests only. |
 | 2026-10-29 | minor | An add_text operation can carry a style (bold, italic, size 1 to 400 pt, #RRGGBB colour) applied to the whole text box; styles are validated at the protocol and in the engine, listed on the card, and undo stays one step. Existing shapes keep their formatting; no live-account request. |
 | 2026-10-29 | minor | Fixed proposals that were rejected as stale after a selection change or slide navigation: the snapshot revision is now a content revision (selection and navigation don't bump it). Mixed answers (text suggestions and slide operations) are accepted and apply atomically in one undo step; a suggestion and a set-text on the same shape are refused. Presentation-wide snapshots record their slide and apply only from it. Offline tests only. |

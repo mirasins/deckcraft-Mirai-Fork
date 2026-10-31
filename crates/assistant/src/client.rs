@@ -95,21 +95,24 @@ impl Client {
     /// connection needs no separate `auth` run (each run starts a Claude Code process).
     pub fn generate_with_auth(&self, request: &Request, cancel: &AtomicBool) -> Result<(AuthState, Response), Error> {
         request.validate()?;
-        let payload = crate::protocol::prompt_payload(request)?;
+        let images = !request.images.is_empty();
+        let payload = if images { crate::protocol::stream_payload(request)? } else { crate::protocol::prompt_payload(request)? };
         let mode = self.auth(cancel)?;
-        let mut args: Vec<&str> = crate::process::GENERATION_ARGS.to_vec();
+        let mut args = crate::process::generation_args(images);
         if let Some(model) = &self.model {
-            args.extend(["--model", model.as_str()]);
+            args.extend(["--model".to_owned(), model.clone()]);
         }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = crate::process::run_claude(
             &self.executable,
-            &args,
+            &arg_refs,
             payload.as_bytes(),
             crate::process::generate_limits(),
             cancel,
             mode == AuthState::OAuthToken,
         )?;
-        let parsed = crate::protocol::parse_response(&out.stdout, request.targets.len())
+        let parse = if images { crate::protocol::parse_stream_response } else { crate::protocol::parse_response };
+        let parsed = parse(&out.stdout, request.targets.len())
             .and_then(|response| crate::protocol::check_shape_refs(&response, request.geometry.len()).map(|()| response));
         match parsed {
             Ok(response) if out.success => Ok((mode, response)),

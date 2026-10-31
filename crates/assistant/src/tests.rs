@@ -6,8 +6,10 @@ use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::process::{AUTH_ARGS, GENERATION_ARGS, Limits, credential_override_keys, key_present, run};
-use crate::protocol::{Source, check_shape_refs, parse_auth_status, parse_response, prompt_payload, select_auth};
+use crate::process::{AUTH_ARGS, Limits, credential_override_keys, generation_args, key_present, run};
+use crate::protocol::{
+    Source, check_shape_refs, parse_auth_status, parse_response, parse_stream_response, prompt_payload, select_auth, stream_payload,
+};
 use crate::{AuthState, Client, Error, GeometryTarget, MAX_OUTPUT_BYTES, MAX_TARGETS, MAX_TEXT_BYTES, Provider, Request};
 
 fn request(targets: &[&str]) -> Request {
@@ -17,6 +19,7 @@ fn request(targets: &[&str]) -> Request {
         structure: Vec::new(),
         context: None,
         geometry: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -157,15 +160,19 @@ fn token_presence_is_detected_without_values() {
 #[test]
 fn auth_and_generation_share_safe_mode() {
     assert_eq!(AUTH_ARGS.first(), Some(&"--safe-mode"));
-    assert_eq!(GENERATION_ARGS.first(), Some(&"--safe-mode"));
-    assert!(GENERATION_ARGS.contains(&"--no-session-persistence"));
-    assert!(GENERATION_ARGS.contains(&"--strict-mcp-config"));
-    assert!(GENERATION_ARGS.contains(&"dontAsk"));
-    assert!(GENERATION_ARGS.contains(&"--output-format"));
-    assert!(!GENERATION_ARGS.contains(&"--bare"));
+    for images in [false, true] {
+        let args = generation_args(images);
+        assert_eq!(args.first().map(String::as_str), Some("--safe-mode"));
+        assert!(args.contains(&"--no-session-persistence".to_owned()));
+        assert!(args.contains(&"--strict-mcp-config".to_owned()));
+        assert!(args.contains(&"dontAsk".to_owned()));
+        assert!(args.contains(&"--output-format".to_owned()));
+        assert!(!args.contains(&"--bare".to_owned()));
+        let tools = args.iter().position(|a| a == "--tools");
+        assert_eq!(tools.and_then(|i| args.get(i + 1)).map(String::as_str), Some(""));
+        assert_eq!(args.contains(&"stream-json".to_owned()), images);
+    }
     assert!(!AUTH_ARGS.contains(&"--bare"));
-    let tools = GENERATION_ARGS.iter().position(|a| *a == "--tools");
-    assert_eq!(tools.and_then(|i| GENERATION_ARGS.get(i + 1)), Some(&""));
 }
 
 #[test]
@@ -362,7 +369,14 @@ fn shape_operations_reject_fields_that_belong_to_other_kinds() {
 fn geometry_is_sent_only_when_present_and_bounded() {
     let mut req = request(&["Intro"]);
     assert!(!prompt_payload(&req).unwrap_or_default().contains("geometry"));
-    req.geometry = vec![GeometryTarget { index: 0, label: "Rectangle 2".into(), preset: "rect".into(), rect: [10.0, 20.0, 100.0, 50.0], fill: None }];
+    req.geometry = vec![GeometryTarget {
+        index: 0,
+        label: "Rectangle 2".into(),
+        preset: "rect".into(),
+        rect: [10.0, 20.0, 100.0, 50.0],
+        fill: None,
+        slide_index: None,
+    }];
     assert_eq!(req.validate(), Ok(()));
     let payload = prompt_payload(&req).unwrap_or_default();
     assert!(
@@ -688,6 +702,7 @@ fn live_generation_with_signed_in_account() {
         structure: Vec::new(),
         context: None,
         geometry: Vec::new(),
+        images: Vec::new(),
     };
     let response = client.generate(&request, &cancel).unwrap();
     eprintln!("live: auth {auth:?}, {} suggestion(s): {:?}", response.suggestions.len(), response.suggestions);
@@ -699,4 +714,87 @@ fn live_generation_with_signed_in_account() {
 fn claude_starts_without_a_console_window() {
     // Win32 CREATE_NO_WINDOW; `run_claude` sets it on Windows, where std can't read it back.
     assert_eq!(crate::process::CREATE_NO_WINDOW, 0x0800_0000);
+}
+
+/// A minimal valid PNG: the eight-byte signature only, enough for validation.
+fn png_signature() -> Vec<u8> {
+    let mut png = Vec::new();
+    png.extend_from_slice(&[0x89]);
+    png.extend_from_slice(b"PNG");
+    png.extend_from_slice(&[0x0D, 0x0A]);
+    png.extend_from_slice(&[0x1A, 0x0A]);
+    png
+}
+
+#[test]
+fn images_are_bounded_and_png_only() {
+    let mut req = request(&["Hello"]);
+    req.images = vec![crate::RequestImage { png: png_signature() }];
+    assert_eq!(req.validate(), Ok(()));
+    // Not a PNG.
+    req.images = vec![crate::RequestImage { png: b"JFIF-pretending".to_vec() }];
+    assert_eq!(req.validate(), Err(Error::TooLong));
+    // Too many.
+    req.images = (0..=crate::MAX_IMAGES).map(|_| crate::RequestImage { png: png_signature() }).collect();
+    assert_eq!(req.validate(), Err(Error::TooLong));
+    // Too large.
+    let mut big = png_signature();
+    big.resize(crate::MAX_IMAGE_BYTES + 1, 0);
+    req.images = vec![crate::RequestImage { png: big }];
+    assert_eq!(req.validate(), Err(Error::TooLong));
+}
+
+#[test]
+fn stream_payload_is_one_user_message_with_base64_images() {
+    let mut req = request(&["Hello"]);
+    req.images = vec![crate::RequestImage { png: png_signature() }];
+    let payload = stream_payload(&req).unwrap();
+    assert!(payload.ends_with('\n'));
+    let value: serde_json::Value = serde_json::from_str(payload.trim()).unwrap();
+    assert_eq!(value["type"], "user");
+    assert_eq!(value["message"]["role"], "user");
+    let content = value["message"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    // RFC 4648 base64 of the eight signature bytes.
+    assert_eq!(content[1]["source"]["data"], "iVBORw0KGgo=");
+}
+
+#[test]
+fn stream_result_line_is_parsed_and_validated() {
+    let mut req = request(&["Hello"]);
+    req.images = vec![crate::RequestImage { png: png_signature() }];
+    let structured = r#"{"suggestions":[{"index":0,"text":"Hi"}],"explanation":"Shorter.","deck":null}"#;
+    let line = format!(
+        "{{\"type\":\"system\",\"subtype\":\"init\"}}
+{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"{}\"}}
+",
+        structured.replace('"', r#"\""#)
+    );
+    let response = parse_stream_response(line.as_bytes(), 1).unwrap();
+    assert_eq!(response.suggestions.len(), 1);
+    assert_eq!(response.suggestions[0].text, "Hi");
+    // No result line at all.
+    assert_eq!(
+        parse_stream_response(
+            b"{\"type\":\"system\"}
+",
+            1
+        ),
+        Err(Error::InvalidResponse)
+    );
+    // An error result keeps its sanitized category.
+    let error_line = b"{\"type\":\"result\",\"is_error\":true,\"api_error_status\":401,\"result\":null}
+";
+    assert_eq!(parse_stream_response(error_line, 1), Err(Error::Authentication));
+    // A suggestion outside the targets is refused.
+    let outside = format!(
+        "{{\"type\":\"result\",\"is_error\":false,\"result\":\"{}\"}}
+",
+        structured.replace('"', r#"\""#)
+    );
+    assert_eq!(parse_stream_response(outside.as_bytes(), 0), Err(Error::InvalidResponse));
 }

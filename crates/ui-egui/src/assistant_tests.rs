@@ -391,3 +391,23 @@ fn moving_the_selection_keeps_a_proposal_applicable() {
     let status = app.run("ui.assistant.status", json!({})).unwrap();
     assert!(status["proposals"].as_array().is_some_and(Vec::is_empty), "{status}");
 }
+
+#[test]
+fn toggling_images_cancels_an_armed_request_and_images_need_consent() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = composing_harness(app());
+    // The checkbox is off by default; a request never carries images without it.
+    assert!(!h.state().assistant.include_images);
+    enter(&mut h);
+    assert!(h.state().assistant.armed.is_some());
+    h.get_by_label("Send rendered slide images").click();
+    h.run_steps(2);
+    assert!(h.state().assistant.include_images);
+    assert!(h.state().assistant.armed.is_none(), "toggling images must cancel the confirmation");
+    // The control channel refuses a non-boolean images flag and still requires confirm.
+    let mut app = app();
+    app.run("ui.assistant", json!({"value": true})).unwrap();
+    assert!(app.run("ui.assistant.request", json!({"instruction": "Shorten", "images": "yes", "confirm": true})).is_err());
+    let error = app.run("ui.assistant.request", json!({"instruction": "Shorten", "images": true})).unwrap_err();
+    assert!(error.contains("confirm"), "{error}");
+}

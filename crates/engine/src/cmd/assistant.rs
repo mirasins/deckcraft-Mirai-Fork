@@ -57,6 +57,15 @@ pub fn specs() -> Vec<CommandSpec> {
             geometry::context
         ),
         cmd!(
+            query "assistant.presentationGeometryContext",
+            "Writing Assistant Presentation Geometry Context",
+            [],
+            None,
+            "{} → {document_id, revision, scope: \"presentation\", slide_index, slide_id, skipped, shapes: [{index, slide_index, slide_id, shape, label, preset, rect: [x, y, w, h], fill: #RRGGBB|null}]}: unlocked autoshapes without text on every slide, up to 256; each entry names the slide it was captured from",
+            has_slide,
+            geometry::presentation_context
+        ),
+        cmd!(
             "assistant.apply",
             "Apply Writing Assistant Changes",
             [],
@@ -91,6 +100,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{context: snapshot from assistant.presentationContext, changes: [{index, text, markdown?: false}]} → {applied, document_id, revision}; one undo step, all or nothing",
             has_slide,
             apply_presentation
+        ),
+        cmd!(
+            "assistant.applyPresentationDeck",
+            "Apply Mirai Presentation Changes",
+            [],
+            None,
+            "{context, changes?, deck, geometry?} → presentation-wide text and deck changes, one undo step",
+            has_slide,
+            apply_presentation_deck
         ),
     ]
 }
@@ -628,6 +646,9 @@ fn apply_deck(s: &mut Session, v: &Value) -> Result<Value> {
     let geo = top.get("geometry").map(|g| geometry::parse(g, CMD_DECK)).transpose()?;
     if let Some(g) = &geo {
         geometry::check(s, g, CMD_DECK)?;
+        if geometry::slide_index(g) != req.slide_index || geometry::slide_id(g) != req.slide_id {
+            return Err(bad(CMD_DECK, "the geometry is from another slide; read it again"));
+        }
     }
     let deck = object(top.get("deck").ok_or_else(|| bad(CMD_DECK, "missing deck"))?, "deck", &["operations"], CMD_DECK)?;
     let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(CMD_DECK, "operations must be an array"))?;
@@ -666,7 +687,7 @@ fn check_captured(context: &Value) -> Result<()> {
     }
     let mut captured_bytes = 0usize;
     for target in captured {
-        let m = object(target, "target", &["index", "shape", "label", "original"], CMD_DECK)?;
+        let m = object(target, "target", &["index", "slide_index", "slide_id", "shape", "label", "original"], CMD_DECK)?;
         let original = text_field(m, "original", CMD_DECK, MAX_TEXT_BYTES)?;
         text_field(m, "label", CMD_DECK, MAX_LABEL_BYTES)?;
         captured_bytes = captured_bytes.saturating_add(original.len());
@@ -688,6 +709,7 @@ fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
         "new_slide" => &["layout", "text"][..],
         "add_text" => &["rect", "text", "style"][..],
         "set_text" => &["target", "text"][..],
+        "set_style" => &["target", "style"][..],
         "set_bounds" => &["target", "rect"][..],
         "set_shape_bounds" => &["shape", "rect"][..],
         "set_shape_fill" => &["shape", "color"][..],
@@ -725,6 +747,9 @@ fn check_operation(c: &mut DeckCheck, m: &Map<String, Value>, kind: &str) -> Res
     if kind == "add_text" && is_set(m, "style") {
         check_style(m)?;
     }
+    if kind == "set_style" {
+        check_style(m)?;
+    }
     Ok(())
 }
 
@@ -740,7 +765,7 @@ fn check_new_slide(m: &Map<String, Value>, kind: &str) -> Result<()> {
 
 /// `set_text` and `set_bounds` address a captured text shape, and come before any new slide.
 fn check_captured_target(c: &DeckCheck, m: &Map<String, Value>, kind: &str) -> Result<()> {
-    if !matches!(kind, "set_text" | "set_bounds") {
+    if !matches!(kind, "set_text" | "set_bounds" | "set_style") {
         return Ok(());
     }
     if c.after_new {
@@ -879,6 +904,7 @@ fn run_operation(s: &mut Session, req: &Request, geo: Option<&geometry::Request>
     match kind {
         "new_slide" => run_new_slide(s, m),
         "add_text" => run_add_text(s, m),
+        "set_style" => run_set_style(s, req, m),
         "set_shape_bounds" | "set_shape_fill" => run_shape(s, geo, m, kind),
         "add_shape" => run_add_shape(s, m),
         "background" => s.execute("design.background", &json!({"color": m.get("color")})).map(|_| ()),
@@ -939,6 +965,11 @@ fn apply_style(s: &mut Session, style: &Value) -> Result<()> {
 fn run_shape(s: &mut Session, geo: Option<&geometry::Request>, m: &Map<String, Value>, kind: &str) -> Result<()> {
     let i = usize::try_from(uint(m, "shape", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid shape"))?;
     let id = geometry::target(geo, i, CMD_DECK)?;
+    run_shape_id(s, geo, i, id, m, kind)
+}
+
+/// Runs a shape operation whose geometry index and shape id are already known.
+fn run_shape_id(s: &mut Session, geo: Option<&geometry::Request>, i: usize, id: ShapeId, m: &Map<String, Value>, kind: &str) -> Result<()> {
     if kind == "set_shape_fill" {
         // A line, arc or connector has no inside: its colour is the stroke's.
         let line = geometry::preset(geo, i).is_some_and(deckcraft_geom::preset::is_line_like);
@@ -957,6 +988,16 @@ fn run_add_shape(s: &mut Session, m: &Map<String, Value>) -> Result<()> {
         s.execute(if line { "shape.line" } else { "shape.fill" }, &json!({"ids": [id], "color": color}))?;
     }
     // Like add_text, the proposal leaves nothing selected.
+    s.execute("edit.select", &json!({"ids": []}))?;
+    Ok(())
+}
+
+fn run_set_style(s: &mut Session, req: &Request, m: &Map<String, Value>) -> Result<()> {
+    let i = usize::try_from(uint(m, "target", CMD_DECK)?).map_err(|_| bad(CMD_DECK, "invalid target"))?;
+    let target = req.targets.get(i).ok_or_else(|| bad(CMD_DECK, "invalid target"))?;
+    let style = m.get("style").ok_or_else(|| bad(CMD_DECK, "missing style"))?;
+    s.execute("edit.select", &json!({"ids": [target.shape.0]}))?;
+    apply_style(s, style)?;
     s.execute("edit.select", &json!({"ids": []}))?;
     Ok(())
 }
@@ -982,7 +1023,7 @@ fn set_bounds(s: &mut Session, m: &Map<String, Value>, id: u32) -> Result<()> {
 /// copied out of it.
 fn parse_presentation(v: &Value) -> Result<PresentationRequest> {
     let cmd = "assistant.applyPresentation";
-    let top = object(v, "parameters", &["context", "changes"], cmd)?;
+    let top = object(v, "parameters", &["context", "changes", "deck", "geometry"], cmd)?;
     let ctx = top.get("context").ok_or_else(|| bad(cmd, "missing `context`"))?;
     let c = object(ctx, "context", &["document_id", "revision", "scope", "slide_index", "skipped", "targets"], cmd)?;
     let document_id = uint(c, "document_id", cmd)?;
@@ -1106,6 +1147,10 @@ fn plan_presentation(req: &PresentationRequest) -> Result<Vec<(usize, ShapeId, S
 }
 
 fn apply_presentation(s: &mut Session, v: &Value) -> Result<Value> {
+    let top = object(v, "parameters", &["context", "changes", "deck", "geometry"], "assistant.applyPresentation")?;
+    if top.get("deck").is_some_and(|d| !d.is_null()) {
+        return apply_presentation_deck(s, v);
+    }
     let cmd = "assistant.applyPresentation";
     let req = parse_presentation(v)?;
     let (uid, revision, current_slide) = {
@@ -1127,6 +1172,196 @@ fn apply_presentation(s: &mut Session, v: &Value) -> Result<Value> {
     s.execute("slide.go", &json!({"index": current_slide}))?;
     let st = s.doc()?;
     Ok(json!({"applied": planned.len(), "document_id": st.uid, "revision": st.content_revision}))
+}
+
+/// Presentation-wide text replacements followed by deck operations that may touch any captured
+/// target or create new slides. Everything is validated before the first edit and applies as one
+/// undo step.
+fn apply_presentation_deck(s: &mut Session, v: &Value) -> Result<Value> {
+    let cmd = "assistant.applyPresentationDeck";
+    let top = object(v, "parameters", &["context", "changes", "deck", "geometry"], cmd)?;
+    let context = top.get("context").ok_or_else(|| bad(cmd, "missing context"))?;
+    check_captured(context)?;
+    let changes = top.get("changes").cloned().unwrap_or_else(|| json!([]));
+    let req = parse_presentation(&json!({"context": context, "changes": changes}))?;
+    let (uid, revision, current_slide) = {
+        let st = s.doc()?;
+        (st.uid, st.content_revision, st.selection.slide)
+    };
+    if req.document_id != uid || req.revision != revision || current_slide != req.slide_index {
+        return Err(bad(cmd, "stale context: the document or the current slide changed since the context was read; read it again"));
+    }
+    check_presentation_targets(s, &req)?;
+    let planned = plan_presentation(&req)?;
+    let geo = top.get("geometry").map(|g| geometry::parse(g, cmd)).transpose()?;
+    if let Some(g) = &geo {
+        geometry::check(s, g, cmd)?;
+    }
+    let deck = object(top.get("deck").ok_or_else(|| bad(cmd, "missing deck"))?, "deck", &["operations"], cmd)?;
+    let ops = deck.get("operations").and_then(Value::as_array).ok_or_else(|| bad(cmd, "operations must be an array"))?;
+    if ops.is_empty() || ops.len() > MAX_DECK_OPERATIONS {
+        return Err(bad(cmd, format!("provide 1 to {MAX_DECK_OPERATIONS} operations")));
+    }
+    let mut check = PresentationDeckCheck {
+        req: &req,
+        geo: geo.as_ref(),
+        replaced: planned.iter().map(|(_, shape, _)| *shape).collect(),
+        after_new: false,
+        total_text: 0,
+    };
+    check_presentation_operations(&mut check, ops)?;
+    // Apply text suggestions first, on their own slides.
+    for (slide_index, shape, text) in &planned {
+        s.execute("slide.go", &json!({"index": slide_index}))?;
+        s.execute("text.set", &json!({"id": shape.0, "text": text}))?;
+    }
+    s.execute("slide.go", &json!({"index": current_slide}))?;
+    // Apply deck operations in order.
+    let mut working = current_slide;
+    for op in ops {
+        let m = object(op, "operation", &OPERATION_FIELDS, cmd)?;
+        let kind = text_field(m, "kind", cmd, 32)?;
+        match kind {
+            "new_slide" => {
+                run_new_slide(s, m)?;
+                working = s.doc()?.selection.slide;
+            }
+            "add_text" => {
+                s.execute("slide.go", &json!({"index": working}))?;
+                run_add_text(s, m)?;
+            }
+            "set_style" => {
+                let i = usize::try_from(uint(m, "target", cmd)?).map_err(|_| bad(cmd, "invalid target"))?;
+                let target = req.targets.get(i).ok_or_else(|| bad(cmd, "target outside captured presentation"))?;
+                s.execute("slide.go", &json!({"index": target.slide_index}))?;
+                let style = m.get("style").ok_or_else(|| bad(cmd, "missing style"))?;
+                s.execute("edit.select", &json!({"ids": [target.shape.0]}))?;
+                apply_style(s, style)?;
+                s.execute("edit.select", &json!({"ids": []}))?;
+                s.execute("slide.go", &json!({"index": working}))?;
+            }
+            "set_text" => {
+                let i = usize::try_from(uint(m, "target", cmd)?).map_err(|_| bad(cmd, "invalid target"))?;
+                let target = req.targets.get(i).ok_or_else(|| bad(cmd, "target outside captured presentation"))?;
+                s.execute("slide.go", &json!({"index": target.slide_index}))?;
+                s.execute("text.set", &json!({"id": target.shape.0, "text": m.get("text")}))?;
+                s.execute("slide.go", &json!({"index": working}))?;
+            }
+            "set_bounds" => {
+                let i = usize::try_from(uint(m, "target", cmd)?).map_err(|_| bad(cmd, "invalid target"))?;
+                let target = req.targets.get(i).ok_or_else(|| bad(cmd, "target outside captured presentation"))?;
+                s.execute("slide.go", &json!({"index": target.slide_index}))?;
+                set_bounds(s, m, target.shape.0)?;
+                s.execute("slide.go", &json!({"index": working}))?;
+            }
+            "set_shape_bounds" | "set_shape_fill" => {
+                // Shape geometry is only valid on the slide it was captured from; apply there,
+                // then return to the slide the rest of the proposal is building on.
+                let i = usize::try_from(uint(m, "shape", cmd)?).map_err(|_| bad(cmd, "invalid shape"))?;
+                let (claim_slide, id) = geometry::claim(geo.as_ref(), i, cmd)?;
+                s.execute("slide.go", &json!({"index": claim_slide}))?;
+                run_shape_id(s, geo.as_ref(), i, id, m, kind)?;
+                s.execute("slide.go", &json!({"index": working}))?;
+            }
+            "add_shape" => {
+                s.execute("slide.go", &json!({"index": working}))?;
+                run_add_shape(s, m)?;
+            }
+            "background" => {
+                s.execute("slide.go", &json!({"index": working}))?;
+                s.execute("design.background", &json!({"color": m.get("color")}))?;
+            }
+            _ => return Err(bad(cmd, "unknown operation")),
+        }
+    }
+    s.execute("slide.go", &json!({"index": current_slide}))?;
+    Ok(json!({"applied": ops.len(), "text_changes": planned.len()}))
+}
+
+struct PresentationDeckCheck<'a> {
+    req: &'a PresentationRequest,
+    geo: Option<&'a geometry::Request>,
+    replaced: HashSet<ShapeId>,
+    after_new: bool,
+    total_text: usize,
+}
+
+fn check_presentation_operations(c: &mut PresentationDeckCheck, ops: &[Value]) -> Result<()> {
+    for op in ops {
+        let m = object(op, "operation", &OPERATION_FIELDS, "assistant.applyPresentationDeck")?;
+        let kind = text_field(m, "kind", "assistant.applyPresentationDeck", 32)?;
+        if kind == "new_slide" {
+            c.after_new = true;
+        }
+        let allowed = allowed_fields(kind).ok_or_else(|| bad("assistant.applyPresentationDeck", "unknown operation"))?;
+        if ["target", "layout", "text", "rect", "color", "style", "shape", "preset"].iter().any(|key| is_set(m, key) && !allowed.contains(key)) {
+            return Err(bad("assistant.applyPresentationDeck", "unexpected operation field"));
+        }
+        // new_slide
+        if kind == "new_slide" {
+            let layout = text_field(m, "layout", "assistant.applyPresentationDeck", 32)?;
+            if !matches!(layout, "blank" | "title" | "titleAndContent") {
+                return Err(bad("assistant.applyPresentationDeck", "invalid layout"));
+            }
+        }
+        // captured targets
+        if matches!(kind, "set_text" | "set_bounds" | "set_style") {
+            if c.after_new {
+                return Err(bad("assistant.applyPresentationDeck", "original targets cannot be edited after creating a slide"));
+            }
+            let target = usize::try_from(uint(m, "target", "assistant.applyPresentationDeck")?)
+                .map_err(|_| bad("assistant.applyPresentationDeck", "invalid target"))?;
+            let shape =
+                c.req.targets.get(target).ok_or_else(|| bad("assistant.applyPresentationDeck", "target outside captured presentation"))?.shape;
+            if kind == "set_text" && c.replaced.contains(&shape) {
+                return Err(bad("assistant.applyPresentationDeck", "a target can't get both a text suggestion and a set_text operation"));
+            }
+        }
+        // shape targets
+        if matches!(kind, "set_shape_bounds" | "set_shape_fill") {
+            if c.after_new {
+                return Err(bad("assistant.applyPresentationDeck", "shape targets cannot be edited after creating a slide"));
+            }
+            let i = usize::try_from(uint(m, "shape", "assistant.applyPresentationDeck")?)
+                .map_err(|_| bad("assistant.applyPresentationDeck", "invalid shape"))?;
+            geometry::target(c.geo, i, "assistant.applyPresentationDeck")?;
+            if kind == "set_shape_fill" {
+                check_color(m, "color", true)?;
+            }
+        }
+        // add_shape
+        if kind == "add_shape" {
+            let preset = text_field(m, "preset", "assistant.applyPresentationDeck", geometry::MAX_PRESET_BYTES)?;
+            if deckcraft_geom::preset::info(preset).is_none() {
+                return Err(bad("assistant.applyPresentationDeck", "preset must be a shape from the shape gallery"));
+            }
+            if is_set(m, "color") {
+                check_color(m, "color", true)?;
+            }
+        }
+        // text budget
+        if matches!(kind, "add_text" | "set_text") || (kind == "new_slide" && is_set(m, "text")) {
+            let text = text_field(m, "text", "assistant.applyPresentationDeck", MAX_TEXT_BYTES)?;
+            c.total_text = c.total_text.saturating_add(text.len());
+            if c.total_text > MAX_TEXT_BYTES || !plain_ok(text) {
+                return Err(bad("assistant.applyPresentationDeck", "invalid or oversized text"));
+            }
+        }
+        if kind == "set_style" {
+            check_style(m)?;
+        }
+        if kind == "add_text" && is_set(m, "style") {
+            check_style(m)?;
+        }
+        // rect
+        let line = line_operation(c.geo, m, kind);
+        check_rect(m, kind, line)?;
+        // background
+        if kind == "background" {
+            check_color(m, "color", true)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

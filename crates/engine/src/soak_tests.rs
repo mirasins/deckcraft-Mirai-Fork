@@ -17,6 +17,9 @@ fn skipped(id: &str) -> bool {
         || id.starts_with("window.")
         || id.starts_with("show.")
         || id.starts_with("media.")
+        // Mirai commands need a captured context, so random params never edit; their own tests and
+        // the hostile-params test cover them.
+        || id.starts_with("assistant.")
 }
 
 /// xorshift64*: tiny, deterministic, no dependency.

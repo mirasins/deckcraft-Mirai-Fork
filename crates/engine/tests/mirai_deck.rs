@@ -252,3 +252,21 @@ fn invalid_style_is_rejected_without_changes() {
     let deck = json!({"operations": [{"kind":"background", "color":"#123456", "style":{"bold":true}}]});
     assert!(s.execute("assistant.applyDeck", &json!({"context": context, "deck": deck})).is_err());
 }
+
+#[test]
+fn set_style_operation_styles_existing_text_and_undoes() {
+    let mut s = Session::with_new();
+    let id = s.execute("insert.textBox", &json!({"rect":[10,20,100,50],"text":"Old"})).unwrap()["id"].as_u64().unwrap();
+    let context = s.execute("assistant.context", &json!({"scope":"slide"})).unwrap();
+    let target = context["targets"].as_array().unwrap().iter().position(|t| t["shape"] == id).unwrap();
+    let deck = json!({"operations":[
+        {"kind":"set_style", "target":target, "style":{"bold":true,"italic":null,"size":12,"color":null}}
+    ]});
+    s.execute("assistant.applyDeck", &json!({"context":context,"deck":deck})).unwrap();
+    let shape = s.active().unwrap().shape(deckcraft_model::ShapeId(id as u32)).unwrap();
+    assert_eq!(shape.text.as_ref().unwrap().paragraphs[0].runs[0].props.bold, Some(true));
+    assert_eq!(shape.text.as_ref().unwrap().paragraphs[0].runs[0].props.size, Some(12.0));
+    s.execute("edit.undo", &json!({})).unwrap();
+    let shape = s.active().unwrap().shape(deckcraft_model::ShapeId(id as u32)).unwrap();
+    assert_eq!(shape.text.as_ref().unwrap().paragraphs[0].runs[0].props.bold, None);
+}

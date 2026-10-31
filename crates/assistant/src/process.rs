@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::Error;
-use crate::protocol::{MAX_AUTH_OUTPUT_BYTES, MAX_OUTPUT_BYTES, OUTPUT_SCHEMA, SYSTEM_PROMPT};
+use crate::protocol::{MAX_AUTH_OUTPUT_BYTES, MAX_OUTPUT_BYTES, OUTPUT_SCHEMA, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_BLIND, SYSTEM_PROMPT_VISION};
 
 pub(crate) const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const GENERATE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -22,29 +22,44 @@ const POLL: Duration = Duration::from_millis(20);
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Generation flags: safe mode, no tools, no MCP, no session files, no permission prompts.
-/// Prompt data arrives on stdin only.
-pub(crate) const GENERATION_ARGS: &[&str] = &[
-    "--safe-mode",
-    "-p",
-    "--system-prompt",
-    SYSTEM_PROMPT,
-    "--tools",
-    "",
-    "--disallowedTools",
-    "mcp__*",
-    "--strict-mcp-config",
-    "--mcp-config",
-    "{\"mcpServers\":{}}",
-    "--no-session-persistence",
-    "--permission-mode",
-    "dontAsk",
-    "--permission-prompts",
-    "none",
-    "--output-format",
-    "json",
-    "--json-schema",
-    OUTPUT_SCHEMA,
-];
+/// Prompt data arrives on stdin only. With images the CLI needs stream-json input (the official
+/// Agent SDK message form, base64 image blocks) and therefore stream-json output with --verbose.
+pub(crate) fn generation_args(images: bool) -> Vec<String> {
+    let system_prompt =
+        if images { format!("{SYSTEM_PROMPT_BASE}{SYSTEM_PROMPT_VISION}") } else { format!("{SYSTEM_PROMPT_BASE}{SYSTEM_PROMPT_BLIND}") };
+    let mut args = vec![
+        "--safe-mode".to_owned(),
+        "-p".to_owned(),
+        "--system-prompt".to_owned(),
+        system_prompt,
+        "--tools".to_owned(),
+        String::new(),
+        "--disallowedTools".to_owned(),
+        "mcp__*".to_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        "{\"mcpServers\":{}}".to_owned(),
+        "--no-session-persistence".to_owned(),
+        "--permission-mode".to_owned(),
+        "dontAsk".to_owned(),
+        "--permission-prompts".to_owned(),
+        "none".to_owned(),
+        "--json-schema".to_owned(),
+        OUTPUT_SCHEMA.to_owned(),
+    ];
+    if images {
+        args.extend([
+            "--input-format".to_owned(),
+            "stream-json".to_owned(),
+            "--output-format".to_owned(),
+            "stream-json".to_owned(),
+            "--verbose".to_owned(),
+        ]);
+    } else {
+        args.extend(["--output-format".to_owned(), "json".to_owned()]);
+    }
+    args
+}
 
 /// Same safe-mode settings as generation, so the preflight sees the method generation will use.
 pub(crate) const AUTH_ARGS: &[&str] = &["--safe-mode", "auth", "status", "--json"];

@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-use deckcraft_assistant::{AuthState, Error, GeometryTarget, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_STRUCTURE_BYTES, Request, Response};
+use deckcraft_assistant::{
+    AuthState, Error, GeometryTarget, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_INSTRUCTION_BYTES, MAX_MODEL_BYTES, MAX_STRUCTURE_BYTES, Request,
+    RequestImage, Response,
+};
 use egui::{Color32, CornerRadius, Event, ImeEvent, Key, Margin, RichText, Stroke, TextEdit, Ui};
 use serde_json::{Value, json};
 
@@ -78,6 +81,8 @@ pub(crate) struct Armed {
     scope: &'static str,
     instruction: String,
     model: String,
+    /// Whether rendered slide images will be sent with the request.
+    images: bool,
 }
 
 /// The confirmation a change would be checked against, from the live session and pane state.
@@ -91,6 +96,7 @@ fn armed_now(app: &SlideApp) -> Option<Armed> {
         scope: app.assistant.scope,
         instruction: app.assistant.instruction.clone(),
         model: app.assistant.model.clone(),
+        images: app.assistant.include_images,
     })
 }
 
@@ -107,6 +113,9 @@ pub struct State {
     pub(crate) instruction: String,
     /// Claude model alias or id; empty keeps Claude Code's default.
     pub(crate) model: String,
+    /// Whether the user chose to send rendered slide images; off by default and part of the
+    /// confirmed state, so toggling it cancels an armed request.
+    pub(crate) include_images: bool,
     /// Set by the first Enter or Send press; the notice is then shown for this exact state. A
     /// second Enter or Confirm sends. Cleared by any change, by send and by reset.
     pub(crate) armed: Option<Armed>,
@@ -135,6 +144,7 @@ impl Default for State {
             scope: "slide",
             instruction: String::new(),
             model: String::new(),
+            include_images: false,
             armed: None,
             composing: false,
             ime_until: 0,
@@ -189,6 +199,11 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
     };
     let model_text = p.get("model").map(|v| v.as_str().ok_or("`model` must be a string")).transpose()?;
     let model = deckcraft_assistant::model_name(model_text).map_err(|e| e.to_string())?;
+    let include_images = match p.get("images") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => return Err("`images` must be a boolean".into()),
+    };
     let context = if scope == "presentation" {
         app.session.execute("assistant.presentationContext", &json!({}))
     } else {
@@ -199,9 +214,15 @@ fn request(app: &mut SlideApp, p: &Value) -> Result<Value, String> {
     let slide_size =
         app.session.active().map(|d| format!("Scope: {scope}. Slide size in points: {} × {}", d.doc.slide_size.width, d.doc.slide_size.height));
     // Shapes are extras: a slide whose geometry can't be read still gets its text edits.
-    let geometry = if scope == "slide" { app.session.execute("assistant.geometryContext", &json!({})).ok() } else { None };
+    let geometry = match scope {
+        "slide" => app.session.execute("assistant.geometryContext", &json!({})).ok(),
+        "presentation" => app.session.execute("assistant.presentationGeometryContext", &json!({})).ok(),
+        _ => None,
+    };
     let shapes = geometry.as_ref().map(geometry_of).transpose()?.unwrap_or_default();
-    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size, geometry: shapes };
+    // Rendered slide images, only when the user explicitly chose to send them.
+    let images = if include_images { capture_slides(app, scope)? } else { Vec::new() };
+    let request = Request { instruction: instruction.clone(), targets: originals, structure, context: slide_size, geometry: shapes, images };
     request.validate().map_err(|e| e.to_string())?;
     launch(app, Job { doc, slide, scope, context, geometry, instruction, model, request })
 }
@@ -229,9 +250,38 @@ fn geometry_of(snapshot: &Value) -> Result<Vec<GeometryTarget>, String> {
                 preset: shape.get("preset").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 rect: bounds,
                 fill: shape.get("fill").and_then(Value::as_str).map(str::to_owned),
+                slide_index: shape.get("slide_index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()),
             })
         })
         .collect()
+}
+
+/// Renders the slides the request covers to PNG, offscreen, bounded: the current slide for a
+/// slide or selection request, the first [`MAX_IMAGES`] slides for a presentation request. The
+/// render scale keeps the width near 1280 pixels; an image over [`MAX_IMAGE_BYTES`] is re-rendered
+/// smaller, and one that stays over the cap fails the request.
+fn capture_slides(app: &SlideApp, scope: &str) -> Result<Vec<RequestImage>, String> {
+    let doc = app.session.active().ok_or("open a presentation first")?;
+    let count = doc.doc.slides.len();
+    let indices: Vec<usize> = if scope == "presentation" { (0..count).take(MAX_IMAGES).collect() } else { vec![doc.selection.slide] };
+    let width = if doc.doc.slide_size.width.is_finite() && doc.doc.slide_size.width > 0.0 { doc.doc.slide_size.width } else { 720.0 };
+    let mut images = Vec::with_capacity(indices.len());
+    for index in indices {
+        let mut scale = (1280.0 / width).clamp(0.5, 2.0);
+        let mut png = None;
+        for _ in 0..3 {
+            let opts = deckcraft_render::RenderOpts { scale, edit: false, ..Default::default() };
+            let bytes = deckcraft_render::render_slide(&doc.doc, index, &opts).to_png();
+            if bytes.len() <= MAX_IMAGE_BYTES {
+                png = Some(bytes);
+                break;
+            }
+            scale /= 2.0;
+        }
+        let png = png.ok_or("a rendered slide image is too large to send; try again without images")?;
+        images.push(RequestImage { png });
+    }
+    Ok(images)
 }
 
 /// Everything a worker needs, checked, plus what its answer is matched against.
@@ -519,18 +569,22 @@ pub fn apply(app: &mut SlideApp, id: u64) {
     }
     let context = proposal.context.clone();
     let geometry = proposal.geometry.clone();
-    if proposal.scope == "presentation" && proposal.response.deck.is_some() {
-        app.assistant.message = "Whole-presentation requests support text changes only; ask again for text suggestions.".into();
-        return;
-    }
-    let (command, params) = if let Some(deck) = &proposal.response.deck {
+    let (command, params) = if proposal.scope == "presentation" {
+        if let Some(deck) = &proposal.response.deck {
+            let mut params = json!({"context": context, "deck": deck, "changes": changes});
+            if let Some(geometry) = geometry {
+                params["geometry"] = geometry;
+            }
+            ("assistant.applyPresentation", params)
+        } else {
+            ("assistant.applyPresentation", json!({"context": context, "changes": changes}))
+        }
+    } else if let Some(deck) = &proposal.response.deck {
         let mut params = json!({"context": context, "deck": deck, "changes": changes});
         if let Some(geometry) = geometry {
             params["geometry"] = geometry;
         }
         ("assistant.applyDeck", params)
-    } else if proposal.scope == "presentation" {
-        ("assistant.applyPresentation", json!({"context": context, "changes": changes}))
     } else {
         ("assistant.apply", json!({"context": context, "changes": changes}))
     };
@@ -636,6 +690,17 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         composer(ui, state, busy, armed_current.as_ref(), &mut action, &t);
     });
     egui::ScrollArea::vertical().id_salt("assistant-history").auto_shrink([false, false]).show(ui, |ui| {
+        if ui.checkbox(&mut state.include_images, "Send rendered slide images").changed() {
+            state.armed = None;
+        }
+        if state.include_images {
+            let which = if state.scope == "presentation" {
+                format!("Claude will also receive rendered pictures of the first {MAX_IMAGES} slides.")
+            } else {
+                "Claude will also receive a rendered picture of the current slide.".to_owned()
+            };
+            ui.label(RichText::new(which).small().color(t.text_dim));
+        }
         if let Some(pending) = &state.pending {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -673,7 +738,9 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
             let instruction = app.assistant.instruction.clone();
             let model = app.assistant.model.clone();
             let scope = app.assistant.scope;
-            let result = app.run("ui.assistant.request", json!({"instruction": instruction, "scope": scope, "model": model, "confirm": true}));
+            let images = app.assistant.include_images;
+            let result = app
+                .run("ui.assistant.request", json!({"instruction": instruction, "scope": scope, "model": model, "images": images, "confirm": true}));
             match result {
                 Ok(_) => app.assistant.instruction.clear(),
                 Err(error) => app.assistant.message = error,
@@ -816,10 +883,11 @@ fn composer(ui: &mut Ui, state: &mut State, busy: bool, current: Option<&Armed>,
                 _ => "the text and unlocked shapes on this slide",
             };
             let model = if state.model.trim().is_empty() { String::new() } else { format!(" with model {}", state.model.trim()) };
+            let images = if state.include_images { ", plus rendered pictures of the slides" } else { "" };
             notice(
                 ui,
                 &format!(
-                    "Confirm before sending: your instruction, the original text and shape descriptions of {what} go to Claude Code{model}. Press Enter again or choose Confirm and send. Any change cancels this."
+                    "Confirm before sending: your instruction, the original text and shape descriptions of {what} go to Claude Code{model}{images}. Press Enter again or choose Confirm and send. Any change cancels this."
                 ),
                 t,
             );
@@ -969,6 +1037,7 @@ fn deck_op_line(op: &deckcraft_assistant::DeckOperation, labels: &[String], shap
         },
         "add_text" => format!("Text box{rect}{style}"),
         "set_text" => format!("Replace the text of {label}"),
+        "set_style" => format!("Style {label}{style}"),
         "set_bounds" => format!("Move and resize {label}{rect}"),
         "set_shape_bounds" => format!("Move and resize {shape}{rect}"),
         "set_shape_fill" => format!("Fill {shape} with {}", op.color.as_deref().unwrap_or_default()),
