@@ -123,6 +123,27 @@ fn quick_access_toolbar_adds_removes_resets_and_persists() {
     assert_eq!(app.ui.qat.len(), 6);
     app.run("app.qat", json!({"reset": true})).unwrap();
     assert_eq!(ids(app), ["app.home", "file.save", "app.exportDialog", "edit.undo", "edit.redo", "show.fromStart"]);
+    // Alt+1 runs position 0 (app.home) when on Windows/Linux, opening Backstage.
+    app.session.mac_keys = false;
+    assert!(!app.backstage_open());
+    assert!(crate::menus::ui_shortcut(app, egui::Key::Num1, deckcraft_engine::Mods { shift: false, alt: true, cmd: false }));
+    assert!(app.backstage_open());
+    // Disabled while Backstage is open.
+    assert!(!crate::menus::ui_shortcut(app, egui::Key::Num1, deckcraft_engine::Mods { shift: false, alt: true, cmd: false }));
+    app.close_backstage();
+    // Alt+9 is unassigned when there are only 6 items.
+    assert!(!crate::menus::ui_shortcut(app, egui::Key::Num9, deckcraft_engine::Mods { shift: false, alt: true, cmd: false }));
+    // Disabled on macOS so Option+digit types characters.
+    app.session.mac_keys = true;
+    assert!(!crate::menus::ui_shortcut(app, egui::Key::Num1, deckcraft_engine::Mods { shift: false, alt: true, cmd: false }));
+    app.session.mac_keys = false;
+    // Disabled when text is being edited.
+    let shape_id = deckcraft_model::ShapeId(app.session.active().unwrap().selection.shapes.first().map(|s| s.0).unwrap_or(0));
+    app.session.active_mut().unwrap().selection.text = Some(deckcraft_engine::TextSel { shape: shape_id, ..Default::default() });
+    assert!(!crate::menus::ui_shortcut(app, egui::Key::Num1, deckcraft_engine::Mods { shift: false, alt: true, cmd: false }));
+    app.session.active_mut().unwrap().selection.text = None;
+    // Disabled QAT items (e.g. edit.undo when stack is empty) cannot run.
+    assert!(!crate::qat::run_index(app, 3));
     // An older settings file without the toolbar gets the defaults.
     let old: UiState = serde_json::from_value(json!({"tab": "Home"})).unwrap();
     assert_eq!(old.qat.len(), 6);
@@ -2339,4 +2360,14 @@ fn overdue_visible_logic_does_not_reanchor_a_later_hidden_show() {
     // the slide would not advance.
     let _ = ctx.run_logic(&raw_at(12.0, true, false), |ctx| app.tick_hidden_show(ctx, visible_anchor + std::time::Duration::from_secs(3)));
     assert_eq!(app.show.as_ref().unwrap().state.slide, 1, "time from the full visible frame is preserved through the logic-only pass");
+}
+
+/// The Mirai fork's releases update only from the fork's own repository: an upstream merge that
+/// brings craft-update's DeckCraft entry back must not send installed copies to upstream's
+/// releases, which have no Mirai assistant.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn updates_come_from_the_fork_repository() {
+    assert_eq!(crate::UPDATE_APP.repo, "mirasins/deckcraft");
+    assert_eq!(crate::UPDATE_APP.id, "deckcraft");
 }
