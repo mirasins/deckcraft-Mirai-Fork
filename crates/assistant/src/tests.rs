@@ -823,3 +823,16 @@ fn the_prompt_lets_presentation_scope_edit_the_whole_deck() {
     assert!(!crate::protocol::SYSTEM_PROMPT.contains("use only suggestions, with deck set to null"));
     assert!(crate::protocol::OUTPUT_SCHEMA.contains(r#""slide":{"type":["integer","null"],"minimum":1}"#));
 }
+
+#[test]
+fn the_prompt_promotes_aesthetic_elements_using_supported_operations() {
+    let prompt = crate::protocol::SYSTEM_PROMPT;
+    assert!(prompt.contains("Aesthetic elements"));
+    assert!(prompt.contains("colours and colors"));
+    assert!(prompt.contains("shapes"));
+    assert!(prompt.contains("supported operations"));
+    assert!(prompt.contains("never invent images, charts, media, vision or capabilities"));
+    assert!(prompt.contains("Preserve the presentation's content"));
+    assert!(prompt.contains("readable and legible"));
+    assert!(prompt.contains("reviewed and applied only with the user's consent"));
+}
