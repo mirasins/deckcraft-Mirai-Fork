@@ -169,6 +169,24 @@ docs:
 When a task lands, re-score its checklist row, delete or update its `gaps.md` entry, add a line to
 the `ROADMAP.md` progress log, and update each touched doc's status line and revision history.
 
+## Subagents (OpenCode)
+
+- Bounded tasks (search, review, implementation, tests) may be delegated to subagents. **Mistral
+  Large** and **DeepSeek V4.1 Flash** are authorized for specific tasks; check the available
+  models first (`opencode.models`) and never hardcode model identifiers or versions in code or
+  documentation.
+- Use the models best suited to each task; cross-provider verification is not required — the user
+  decides when to verify the work or request a verifier agent.
+- Always pick the smallest model adequate for the task. Do not escalate to a premium model or to
+  providers other than the authorized ones without the user's explicit authorization.
+- Prefer the most economical models for subagents; use Mistral Large or DeepSeek V4.1 Flash when
+  the task's complexity or risk justifies it, and document the reason.
+- The main agent coordinates, makes the complex decisions and performs the final review of
+  delegated work. If an authorized model or its provider is unavailable, say so and use another
+  suitable one.
+- Every rule in this file (asset policy, clean room, never crash, quality gates) binds subagents
+  exactly as it binds anyone else.
+
 ## Contributor credits (About window)
 
 - About ▸ Contributors/Models are compiled into the binary from `contributors/contributors.json`
