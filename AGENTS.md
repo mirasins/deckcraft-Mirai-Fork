@@ -222,16 +222,20 @@ the `ROADMAP.md` progress log, and update each touched doc's status line and rev
 
 ## Subagents (OpenCode)
 
-- Prefer **Mistral Large** for subagents; when the task needs it, use any model through any
-  available provider. Check the available models first (`opencode.models`) and never hardcode
-  model identifiers or versions in code or documentation.
+- Use GPT-6.1 Terra as the first choice for subagents, preferring the OpenAI provider. Other models
+  and providers may be used when the task requires it. Check the available models first
+  (`opencode.models`) and never hardcode API identifiers in code or documentation.
 - Bounded tasks (search, review, implementation, tests) may be delegated according to the
   available capabilities; cross-provider verification is not required — the user decides when to
   verify the work or request a verifier agent.
 - Models from any available provider may be used as the task requires; there is no provider
   restriction for subagents.
-- Keep Mistral Large as the first choice; use another model when the task requires it or Mistral
-  Large is unavailable or out of quota, and report the alternative chosen.
+- Weigh capability, reliability, cost and availability. If a model fails or runs out of quota,
+  report the switch and pick a suitable alternative from any available provider; do not keep
+  retrying the failing model.
+- For complicated problems (hard design or architecture, bugs that resist fixing, high-risk
+  reviews), escalate to more capable models, such as Claude Opus 5.5, GPT-6.1 Sol or other
+  high-end models available. Say why you escalate, and return to the usual model for routine work.
 - The main agent coordinates, makes the complex decisions and performs the final review of
   delegated work. If a requested model is unavailable, say so and use another suitable one.
 - Every rule in this file (asset policy, clean room, never crash, quality gates) binds subagents
