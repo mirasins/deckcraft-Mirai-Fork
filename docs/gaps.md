@@ -1,8 +1,8 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-03 · **Change:** trivial (run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (AI features: first Mirai selected/current-slide text proposals; broader design, translation and deck generation remain open) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-20 · **Change:** trivial (empty chart number-format sections hide values; previous: minor, native chart payloads stored in bounded ZIP members; previous: major, community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-11-04 · **Change:** trivial (workflow-breaking regression fixed: Ctrl+C/X/V use the system clipboard again; #1414 to re-test on Windows; previous: trivial, run alternate language and reflection transforms survive saves; reused slide contents scale to the destination, picker thumbnails remain a gap; previous: trivial (locked No Fill and no-outline click-through regression coverage added; No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged)) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+
+> **Mirai fork:** 2026-11-06 · upstream/main `159ed07e` integrated; the fork keeps the Mirai assistant (selected and current-slide text proposals; broader design, translation and deck generation remain open). Readiness estimates unchanged.
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -163,7 +163,7 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Estimate:** 3–5 h. **Beta blocker.**
 
 ### Image paste fails on Windows (#1414)
-- **Evidence:** #53 is closed (PR #88 pastes an image-only clipboard as a picture); #1414 (Ctrl+V fails to paste external images on Windows) is open. Linux was not re-checked after #53 closed.
+- **Evidence:** #53 is closed (PR #88 pastes an image-only clipboard as a picture); #1414 (Ctrl+V fails to paste external images on Windows) is open. From the egui 0.37 migration (#1350, v0.11.1) to 0.15.0 the desktop build left out eframe's `clipboard` feature, so egui simulated a clipboard inside the app and Ctrl+V never read the system clipboard on any platform. Fixed 2026-11-01, as is a browser's Copy Image on Linux, which pasted its link because Ctrl+V preferred any text over the picture. #1414 may have either cause: re-test on Windows.
 - **Impact:** copy-paste of screenshots is a core workflow.
 - **Estimate:** 2–4 h. **Beta blocker.**
 
@@ -381,6 +381,7 @@ Detail in [localization-parity.md](localization-parity.md).
 | 2026-11-02 | trivial | Run alternate-language metadata now survives native and PPTX saves; UI and proofing gaps remain; scores unchanged |
 | 2026-11-02 | trivial | PPTX reflection geometry is retained through native and PPTX resaves; no rendering parity claim |
 | 2026-11-02 | trivial | Reused slide geometry and content scale to the destination; picker thumbnails remain the reuse gap |
+| 2026-11-01 | trivial | Workflow-breaking regression: image paste entry: the OS clipboard was off from #1350 to 0.15.0; Linux re-checked, Windows #1414 to re-test |
 | 2026-10-31 | trivial | No Fill hit-testing follows resolved fill instead of the presence of a style (#1621); scores unchanged |
 | 2026-10-30 | minor | Slide-show click targets use each shape’s own animation state; scale and rotation test added |
 | 2026-10-28 | trivial | Automatic lists now run independently of Replace text as you type; proofing gap description updated |
