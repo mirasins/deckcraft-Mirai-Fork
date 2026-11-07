@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=DeckCraft
+Name=Mirai Presentations
 GenericName=Presentation
 Comment=Create and present slide decks
 Exec=deckcraft %F

@@ -2,7 +2,9 @@
   <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.deckcraft.png" width="128" height="128" alt="DeckCraft icon: a presentation screen with a bar chart on an orange tile">
 </p>
 
-<h1 align="center">DeckCraft</h1>
+<h1 align="center">Mirai Presentations</h1>
+
+<p align="center"><sub>The Mirai fork of DeckCraft. The app is called Mirai Presentations; the code, binaries, file format and app ids keep DeckCraft's names.</sub></p>
 
 <p align="center">
   <b>Presentations and slide shows; an open-source, modern presentation and slide designer, built in pure Rust.</b>

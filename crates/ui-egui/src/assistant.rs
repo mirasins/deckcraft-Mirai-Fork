@@ -485,7 +485,7 @@ fn explain(error: Error) -> String {
         Error::Unavailable => format!("Claude Code was not found. {INSTALL_HINT}"),
         Error::Authentication => format!("Claude Code is not signed in. Run `{SIGN_IN_COMMAND}` in a terminal, then try again."),
         Error::UnsupportedAuth => {
-            format!("Claude Code uses a sign-in method DeckCraft does not accept. Sign in with your Claude account: `{SIGN_IN_COMMAND}`.")
+            format!("Claude Code uses a sign-in method Mirai Presentations does not accept. Sign in with your Claude account: `{SIGN_IN_COMMAND}`.")
         }
         other => other.to_string(),
     }
@@ -808,7 +808,7 @@ fn status_line(ui: &mut Ui, state: &mut State, t: &Tokens) {
         reset(state);
     }
     ui.collapsing("Sign in", |ui| {
-        ui.label("Claude Code signs you in. DeckCraft never reads or stores your credentials.");
+        ui.label("Claude Code signs you in. Mirai Presentations never reads or stores your credentials.");
         ui.horizontal_wrapped(|ui| {
             ui.monospace(SIGN_IN_COMMAND);
             if ui.button("Copy").clicked() {

@@ -97,6 +97,8 @@ Ubuntu-Font-1.0, Bitstream-Vera); Creative Commons (CC0-1.0, CC-BY-4.0, CC-BY-SA
 domain; or contributor-original (created by a contributor who licenses it under
 `MIT OR Apache-2.0`).
 
+The app's name in this fork is **Mirai Presentations**: `crates/ui-egui/src/brand.rs` holds it (and the built-in "DeckCraft" theme keeps its name). Identifiers keep upstream's DeckCraft names (binary, crates, app id, file format, settings folder, installer registry keys and UpgradeCode); when merging upstream, keep the fork's name in titles, About, README and the installer's display names.
+
 This Mirai fork has removed the ArtCraft name, wordmark and logos (`docs/brand/`, ArtCraft Team
 trademarks), as upstream asks of forks. Keep them out when merging upstream.
 
